@@ -1,0 +1,41 @@
+{
+  "socket": "~/.config/herdr/herdr.sock",
+  "http": { "host": "127.0.0.1", "port": 8791, "path": "/mcp" },
+
+  "auth": {
+    "mode": "token",
+    "token": "<run scripts/gen-token.sh>",
+    "allow_token_in_path": true
+  },
+
+  "projects": {
+    "acme": {
+      "name": "Acme Web App",
+      "root": "~/code/acme-web",
+      "aliases": ["acme", "web app"],
+      "default_kind": "claude"
+    },
+    "shop": {
+      "name": "Shop Backend",
+      "root": "~/code/shop-backend",
+      "aliases": ["shop", "backend"]
+    }
+  },
+  "worktree_patterns": ["~/code/.worktrees/{repo}"],
+  "agent_kinds": ["claude", "codex"],
+
+  "rate_limit": { "max_requests": 120, "window_seconds": 60 },
+  "audit_log": "~/.config/agency/audit.jsonl",
+  "kill_switch": "~/.config/agency/disabled",
+  "read": { "default_lines": 80, "max_lines": 400, "standup_lines": 25 },
+  "send": { "settle_seconds": 8, "max_wait_seconds": 25, "dedupe_minutes": 15 },
+
+  "notify": {
+    "enabled": false,
+    "provider": "ntfy",
+    "on": ["done", "blocked"],
+    "debounce_seconds": 20,
+    "herdr_toast": false,
+    "ntfy": { "url": "https://ntfy.sh", "topic": "<long random topic name>" }
+  }
+}

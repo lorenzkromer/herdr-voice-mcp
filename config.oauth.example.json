@@ -1,0 +1,21 @@
+{
+  "http": { "host": ["127.0.0.1", "10.0.0.5"], "port": 8791, "path": "/mcp" },
+  "public_url": "https://agency.example.com",
+
+  "auth": {
+    "mode": "both",
+    "token": "<run scripts/gen-token.sh>",
+    "allow_token_in_path": true,
+    "oauth": {
+      "issuer": "https://auth.example.com/realms/main",
+      "audience": "herdr-voice-mcp",
+      "allowed_users": ["alice"],
+      "required_group": "agency-users",
+      "scopes": ["openid", "profile"]
+    }
+  },
+
+  "projects": {
+    "acme": { "name": "Acme Web App", "root": "~/code/acme-web", "aliases": ["acme"] }
+  }
+}
