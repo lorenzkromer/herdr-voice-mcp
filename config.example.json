@@ -28,7 +28,7 @@
   "audit_log": "~/.config/agency/audit.jsonl",
   "kill_switch": "~/.config/agency/disabled",
   "read": { "default_lines": 80, "max_lines": 400, "standup_lines": 25 },
-  "send": { "settle_seconds": 8, "max_wait_seconds": 25, "dedupe_minutes": 15 },
+  "send": { "settle_seconds": 3, "max_wait_seconds": 25, "dedupe_minutes": 15 },
 
   "notify": {
     "enabled": false,

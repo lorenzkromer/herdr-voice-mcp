@@ -53,16 +53,31 @@ signal, Claude gives you the content.
 |---|---|---|
 | `status` | Board of all allowed agents: status, project, workspace, time in the current state. `only: "attention"` limits it to blocked and done. | "How are things?" |
 | `standup` | Finished and blocked agents with their last output lines. Remembers the time, so the next stand-up can tell new items from known ones. | "Let's do a stand-up." |
-| `read` | Last lines of one agent's terminal. | "What is the backend agent asking?" |
-| `send` | Delivers a prompt to an agent and acknowledges immediately. Watches a few seconds for an instant question or answer. Refuses an identical prompt to the same agent for 15 minutes unless `force` is set. Refuses while the agent is blocked. | "Tell the web agent to run the tests." |
+| `read` | Last lines of one agent's terminal, also while it works. Says when it read and whether the screen changed since the previous read. | "What is the backend agent asking?" |
+| `send` | Delivers a prompt to an agent and acknowledges immediately. Watches a few seconds for an instant question or answer. A retry with the same `request_id` returns the first result instead of delivering twice. Refuses an identical prompt to the same agent for 15 minutes unless `force` is set. Refuses while the agent is blocked. | "Tell the web agent to run the tests." |
+| `deliveries` | Recent deliveries by `send` and `spawn`, filterable by agent or `request_id`. For "did my task arrive?" after a dropped connection. | "Did the web agent get the task?" |
 | `wait` | Waits at most 25 seconds until an agent is ready, done or blocked. | "Is it done yet?" |
 | `keys` | Sends logical keys to a blocked agent's dialog: `enter`, `esc`, `y`, `n`, arrows, `1`–`9`, `ctrl+c`. | "Say yes." / "Pick option two." |
 | `spawn` | Starts a new agent of an allowed kind in an allowed project, in a new tab or workspace, optionally with a first task. | "Start a Codex in the shop project." |
 | `projects` | Lists the allowed projects with keys and aliases. | "Which projects do you know?" |
 
-Targets are resolved leniently: agent name, pane ID (`w4:p1`), project key,
-name or alias, workspace label, tab label or part of the session topic. If a
-target is ambiguous, Claude gets the list of candidates and asks back.
+Every agent has a stable, speakable handle, `<workspace>/<name, tab label or
+kind>` (for example `shop-backend/codex`), shown by `status` and `standup`.
+Targets are resolved leniently: handle, pane ID (`w4:p1`, also spoken forms
+like `w4 p1`), agent name, workspace label, tab label,
+`<workspace or project>/<name, tab, kind or topic>`, project key, name or
+alias, or part of the session topic. If a target is ambiguous, for example a
+word that is one agent's name and another agent's workspace, Claude gets the
+list of candidates and asks back.
+
+With `instance_name` set (for example `Office`), a target may start with it:
+`Office/shop-backend/codex`. One server controls one Herdr instance today; see
+[docs/design/multi-instance.md](docs/design/multi-instance.md) for the plan to
+control several machines from one board.
+
+Times in `status` and `standup` are measured from the observed state change.
+A state that already existed when the service started is reported as
+"since before <start time>", because its real start is unknown.
 
 Herdr states: `working`, `blocked` (a question or approval dialog is on
 screen), `done` (finished and not yet looked at in Herdr), `idle` (ready) and
@@ -293,20 +308,21 @@ that is acceptable for your code and your clients.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `instance_name` | none | Speakable name of this Herdr instance, e.g. `Office`. Shown in `status`, `standup` and `projects`, accepted as a target prefix (`Office/shop/codex`) |
 | `socket` | `~/.config/herdr/herdr.sock` | Herdr API socket |
 | `http.host` | `127.0.0.1` | Address or list of addresses to listen on |
 | `http.port` | `8791` | Port |
 | `http.path` | `/mcp` | Endpoint path |
 | `public_url` | none | Public base URL, required for OAuth metadata |
 | `auth.*` | `token` mode | See Authentication |
-| `projects.<key>` | none | `name`, `root`, optional `aliases`, `extra_roots`, `default_kind` |
+| `projects.<key>` | none | `name`, `root`, optional `aliases`, `extra_roots`, `default_kind`. Roots may nest; an agent belongs to the project with the most specific matching root |
 | `worktree_patterns` | `[]` | Worktree directories; `{repo}` is replaced by the project root's basename |
 | `agent_kinds` | `["claude", "codex"]` | Kinds `spawn` may start |
 | `rate_limit` | 120 per 60 s | Process-wide request limit |
 | `audit_log` | `~/.config/agency/audit.jsonl` | Audit log file |
 | `kill_switch` | `~/.config/agency/disabled` | While this file exists, HTTP answers 503 |
 | `read.*` | 80 / 400 / 25 | Default, maximum and stand-up line counts |
-| `send.settle_seconds` | `8` | How long `send` watches after delivery |
+| `send.settle_seconds` | `3` | How long `send` watches after delivery |
 | `send.max_wait_seconds` | `25` | Upper bound for `wait` |
 | `send.dedupe_minutes` | `15` | Duplicate-prompt window |
 | `notify.*` | disabled | See Notifications |

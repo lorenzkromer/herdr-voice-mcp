@@ -8,8 +8,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { Audit } from "./audit.js";
 import type { AgencyConfig } from "./config.js";
-import { HerdrClient, HerdrError, type AgentInfo, type AgentStatus } from "./herdr.js";
-import { agentLabel, agentLine, clock, formatBoard, formatStandup, STATUS_WORD, trimTail, type StandupItem } from "./format.js";
+import { HerdrClient, HerdrError, type AgentInfo, type AgentStatus, type PaneReadResult, type ReadSource } from "./herdr.js";
+import { agentLabel, agentLine, clock, clockSeconds, formatBoard, formatStandup, ELAPSED, PROGRESS, STATUS_WORD, trimTail, type StandupItem } from "./format.js";
 import { loadBoard, matchProject, resolveTarget, type AgentView, type Board } from "./projects.js";
 import type { Tracker } from "./tracker.js";
 
@@ -24,6 +24,10 @@ export interface ToolContext {
 
 const StatusEnum = z.enum(["idle", "working", "blocked", "done", "unknown"]);
 
+const TARGET_HELP =
+  "Best: the target string shown by status/standup (e.g. \"steerbase/codex\"). Also accepted: agent name, pane ID (w4:p1), " +
+  "workspace label, \"<workspace or project>/<agent name, tab or kind>\", project name/alias; optionally prefixed with the instance name (\"<instance>/...\"). Ambiguous targets return the candidates.";
+
 /** Keys an operator may send to a blocked agent UI. Deliberately small. */
 export const ALLOWED_KEYS = new Set([
   "enter", "esc", "tab", "space", "backspace",
@@ -36,6 +40,58 @@ const AGENT_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
 /** Process-wide memory of recent deliveries (pane + text → time), shared by all per-request server instances. */
 const recentSends = new Map<string, Date>();
+
+/** send calls by caller-chosen request_id; a retry with the same id gets the original result. */
+const sendRequests = new Map<string, { at: Date; result: Promise<CallToolResult> }>();
+const REQUEST_ID_TTL_MS = 60 * 60_000;
+
+interface Delivery {
+  at: Date;
+  pane_id: string;
+  handle: string;
+  project: string;
+  text: string;
+  request_id: string | null;
+  via: "send" | "spawn";
+  /** delivered = Herdr confirmed the prompt; stalled = typed in, but no reaction observed. */
+  outcome: "delivered" | "stalled";
+}
+/** Log of recent deliveries, newest last, so a caller can check after a dropped connection. */
+const deliveries: Delivery[] = [];
+const MAX_DELIVERIES = 100;
+
+function recordDelivery(d: Delivery): void {
+  deliveries.push(d);
+  if (deliveries.length > MAX_DELIVERIES) deliveries.splice(0, deliveries.length - MAX_DELIVERIES);
+}
+
+/** Per pane: fingerprint and time of the last `read`, for the "changed since last read" hint. */
+const lastReads = new Map<string, { fingerprint: string; at: Date }>();
+
+/** Codes with which agent.read refuses while the agent is busy; pane.read still works then. */
+const READ_FALLBACK_CODES = /not_idle|not_ready|busy/;
+
+/**
+ * Reads an agent's terminal. agent.read can refuse while the agent works (agent_not_idle);
+ * the raw pane read shows the same terminal, so fall back to it instead of failing.
+ */
+async function readScreen(client: HerdrClient, pane_id: string, lines: number, source: ReadSource = "recent_unwrapped"): Promise<PaneReadResult> {
+  try {
+    return await client.agentRead(pane_id, lines, source);
+  } catch (e) {
+    if (e instanceof HerdrError && READ_FALLBACK_CODES.test(e.code)) return client.paneRead(pane_id, lines, source);
+    throw e;
+  }
+}
+
+/** Screen content without lines whose timers tick, so an unchanged screen compares equal. */
+function fingerprint(body: string): string {
+  return body
+    .split("\n")
+    .filter((l) => !PROGRESS.test(l))
+    .map((l) => l.replace(ELAPSED, ""))
+    .join("\n");
+}
 
 function text(t: string, structured?: Record<string, unknown>, isError = false): CallToolResult {
   const r: CallToolResult = { content: [{ type: "text", text: t }] };
@@ -51,6 +107,8 @@ function errorText(e: unknown): string {
 
 function viewJson(a: AgentView) {
   return {
+    instance: a.instance,
+    handle: a.handle,
     pane_id: a.pane_id,
     name: a.name,
     kind: a.kind,
@@ -65,7 +123,7 @@ function viewJson(a: AgentView) {
 }
 
 function describeMany(agents: AgentView[], reason: string): string {
-  return `${reason}. Please be more specific. Candidates:\n${agents.map((a) => `- ${agentLabel(a)} [${a.pane_id}] ${STATUS_WORD[a.status]}${a.topic ? ` · ${a.topic}` : ""}`).join("\n")}`;
+  return `${reason}. Please be more specific. Candidates:\n${agents.map((a) => `- target "${a.handle}" (${a.project_name}) ${STATUS_WORD[a.status]}${a.topic ? ` · ${a.topic}` : ""}`).join("\n")}`;
 }
 
 function slugify(s: string): string {
@@ -79,7 +137,17 @@ function slugify(s: string): string {
 
 export function createMcpServer(ctx: ToolContext): McpServer {
   const { cfg, client, tracker, audit } = ctx;
-  const server = new McpServer({ name: "agency", version: "0.1.0" });
+  const instance = cfg.instance_name ?? null;
+  const server = new McpServer(
+    { name: "agency", title: instance ? `Agency – ${instance}` : "Agency", version: "0.1.0" },
+    {
+      instructions:
+        `Controls the coding agents${instance ? ` on the Herdr instance "${instance}"` : " of one Herdr instance"} (Claude Code, Codex, …) for voice use. ` +
+        "Address agents by the target string that status/standup show" +
+        (instance ? `; a leading "${instance}/" is accepted` : "") +
+        ". Pass a fresh request_id to send and reuse it on retries; after a transport error check deliveries instead of resending.",
+    },
+  );
 
   /** Wraps a tool body with timing, audit logging and error mapping. */
   const run = async (name: string, args: Record<string, unknown>, body: () => Promise<CallToolResult>): Promise<CallToolResult> => {
@@ -127,8 +195,8 @@ export function createMcpServer(ctx: ToolContext): McpServer {
           if (!p) return text(`Unknown project "${args.project}". Allowed: ${Object.values(cfg.projects).map((x) => x.name).join(", ")}.`, undefined, true);
           agents = agents.filter((a) => a.project === p.key);
         }
-        const out = formatBoard(agents, tracker, { hidden: args.project ? 0 : b.hidden, attentionOnly: args.only === "attention" });
-        return text(out, { agents: agents.map(viewJson), hidden: b.hidden });
+        const out = formatBoard(agents, tracker, { hidden: args.project ? 0 : b.hidden, attentionOnly: args.only === "attention", instance });
+        return text(out, { instance, agents: agents.map(viewJson), hidden: b.hidden });
       }),
   );
 
@@ -159,7 +227,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
             let tail: string | null = null;
             if (lines > 0) {
               try {
-                const r = await client.agentRead(agent.pane_id, Math.max(lines * 3, 40));
+                const r = await readScreen(client, agent.pane_id, Math.max(lines * 3, 40));
                 tail = trimTail(r.text, lines);
               } catch (e) {
                 tail = `(output not readable: ${errorText(e)})`;
@@ -168,9 +236,10 @@ export function createMcpServer(ctx: ToolContext): McpServer {
             return { agent, isNew, tail };
           }),
         );
-        const out = formatStandup(items, rest, tracker, last);
+        const out = formatStandup(items, rest, tracker, last, instance);
         tracker.lastStandupAt = new Date();
         return text(out, {
+          instance,
           attention: items.map((i) => ({ ...viewJson(i.agent), is_new: i.isNew, tail: i.tail })),
           others: rest.map(viewJson),
         });
@@ -184,9 +253,10 @@ export function createMcpServer(ctx: ToolContext): McpServer {
       title: "Read an agent's output",
       description:
         "The last lines of an agent's terminal, so you can summarize what happened or what the agent is asking. " +
-        "target: agent name, pane ID, project name/alias or workspace label.",
+        "Works while the agent is busy, too. Each answer carries the read time and whether the screen changed since the previous read of that agent " +
+        "(changed_since_last_read: false means the agent has printed nothing new – do not retell the old content as news).",
       inputSchema: {
-        target: z.string().describe("Agent name, pane ID (w4:p1), project or workspace label."),
+        target: z.string().describe(TARGET_HELP),
         lines: z.number().int().min(1).max(cfg.read.max_lines).optional().describe(`Number of lines (default ${cfg.read.default_lines}).`),
         source: z.enum(["recent_unwrapped", "visible", "recent", "detection"]).optional().describe("Default recent_unwrapped (log-like). visible = the currently visible screen."),
       },
@@ -201,10 +271,28 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         const a = res.agent;
         const lines = Math.min(args.lines ?? cfg.read.default_lines, cfg.read.max_lines);
         // Agent TUIs pad the bottom of the screen with blank rows; fetch more and keep `lines` non-empty ones.
-        const r = await client.agentRead(a.pane_id, Math.min(lines * 2 + 20, cfg.read.max_lines + 40), args.source ?? "recent_unwrapped");
+        const r = await readScreen(client, a.pane_id, Math.min(lines * 2 + 20, cfg.read.max_lines + 40), args.source ?? "recent_unwrapped");
         const body = trimTail(r.text, lines);
-        const head = `${agentLine(a, tracker)}\nLast ${lines} lines${r.truncated ? " (truncated)" : ""}:\n`;
-        return text(head + body, { agent: viewJson(a), text: body, truncated: r.truncated });
+        const now = new Date();
+        const fp = fingerprint(body);
+        const prev = lastReads.get(a.pane_id);
+        lastReads.set(a.pane_id, { fingerprint: fp, at: now });
+        const changed = prev ? prev.fingerprint !== fp : null;
+        const stamp =
+          changed === null
+            ? `Read at ${clockSeconds(now)} (first read of this agent since the service started).`
+            : changed
+              ? `Read at ${clockSeconds(now)}. CHANGED since the previous read at ${clockSeconds(prev!.at)}.`
+              : `Read at ${clockSeconds(now)}. UNCHANGED since the previous read at ${clockSeconds(prev!.at)} – nothing new on screen.`;
+        const head = `${agentLine(a, tracker)}\n${stamp}\nLast ${lines} lines${r.truncated ? " (truncated)" : ""}:\n`;
+        return text(head + body, {
+          agent: viewJson(a),
+          text: body,
+          truncated: r.truncated,
+          read_at: now.toISOString(),
+          changed_since_last_read: changed,
+          previous_read_at: prev?.at.toISOString() ?? null,
+        });
       }),
   );
 
@@ -216,26 +304,53 @@ export function createMcpServer(ctx: ToolContext): McpServer {
       description:
         "Delivers a prompt to a running agent and acknowledges delivery right away. It then watches for only a few seconds whether the agent immediately asks a question or is already done; " +
         "usually it is still working – check later with wait, status or read. " +
-        "IMPORTANT: if the connection drops during this call, the task still counts as delivered. Never retry blindly; check with read first. " +
+        "IMPORTANT: always pass a fresh request_id and reuse the SAME request_id when retrying after a transport error – the server then returns the original result instead of delivering twice. " +
+        "Without request_id, never retry blindly; check with deliveries (or read) whether the task arrived. " +
         "An identical text to the same agent is refused within " + cfg.send.dedupe_minutes + " minutes unless force=true. " +
         "Refuses to send while the agent is waiting for a decision (use keys or read then).",
       inputSchema: {
-        target: z.string().describe("Agent name, pane ID, project or workspace label."),
+        target: z.string().describe(TARGET_HELP),
         text: z.string().min(1).describe("The task, exactly as it should be given to the agent."),
         settle_seconds: z.number().int().min(0).max(20).optional().describe(`How long to watch for an immediate state after delivery (default ${cfg.send.settle_seconds}, 0 = not at all).`),
         force: z.boolean().optional().describe("Send the same text again despite a recent delivery."),
+        request_id: z.string().min(1).max(100).optional().describe("Caller-chosen idempotency key (any unique string). A retry with the same request_id returns the first result and never delivers twice."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async (args) =>
       run("send", args, async () => {
+        if (!args.request_id) return doSend(args);
+        for (const [k, v] of sendRequests) if (Date.now() - v.at.getTime() > REQUEST_ID_TTL_MS) sendRequests.delete(k);
+        const earlier = sendRequests.get(args.request_id);
+        if (earlier) {
+          const r = await earlier.result;
+          const first = r.content[0]?.type === "text" ? r.content[0].text : "";
+          return {
+            ...r,
+            content: [{ type: "text", text: `Replay: request_id "${args.request_id}" was already handled at ${clockSeconds(earlier.at)}; nothing was sent again. The original answer was:\n${first}` }],
+            structuredContent: { ...(r.structuredContent ?? {}), replayed: true, first_handled_at: earlier.at.toISOString() },
+          };
+        }
+        const entry = { at: new Date(), result: doSend(args) };
+        sendRequests.set(args.request_id, entry);
+        const r = await entry.result.catch((e) => {
+          sendRequests.delete(args.request_id!);
+          throw e;
+        });
+        // Only a delivery is final; a refusal (unknown target, blocked, ...) may be retried with the same id.
+        if (r.structuredContent?.delivered !== true) sendRequests.delete(args.request_id);
+        return r;
+      }),
+  );
+
+  async function doSend(args: { target: string; text: string; settle_seconds?: number; force?: boolean; request_id?: string }): Promise<CallToolResult> {
         const b = await board();
         const res = resolveTarget(b, cfg, args.target);
         if (res.kind === "none") return text(res.reason, undefined, true);
         if (res.kind === "many") return text(describeMany(res.agents, res.reason), { candidates: res.agents.map(viewJson) }, true);
         const a = res.agent;
         if (a.status === "blocked") {
-          const r = await client.agentRead(a.pane_id, 30);
+          const r = await readScreen(client, a.pane_id, 30);
           return text(
             `${agentLabel(a)} is waiting for a decision and does not accept a new task. Current screen:\n${trimTail(r.text, 20)}`,
             { agent: viewJson(a), blocked: true },
@@ -261,6 +376,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         } catch (e) {
           if (e instanceof HerdrError && e.code === "agent_prompt_stalled") {
             recentSends.set(key, new Date());
+            recordDelivery({ at: new Date(), pane_id: a.pane_id, handle: a.handle, project: a.project_name, text: args.text, request_id: args.request_id ?? null, via: "send", outcome: "stalled" });
             return text(
               `The text was sent to ${agentLabel(a)}, but Herdr observed no reaction. Delivered, outcome unknown – check with read, do not resend blindly.`,
               { agent: viewJson(a), delivered: true, stalled: true },
@@ -270,6 +386,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
           throw e;
         }
         recentSends.set(key, new Date());
+        recordDelivery({ at: new Date(), pane_id: a.pane_id, handle: a.handle, project: a.project_name, text: args.text, request_id: args.request_id ?? null, via: "send", outcome: "delivered" });
         for (const [k, t] of recentSends) if (Date.now() - t.getTime() > Math.max(windowMs, 60_000)) recentSends.delete(k);
         tracker.observe(delivered);
 
@@ -282,7 +399,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
             const settled = await client.agentWait(a.pane_id, ["idle", "done", "blocked"], settleMs);
             tracker.observe(settled);
             status = settled.agent_status;
-            const r = await client.agentRead(a.pane_id, 40);
+            const r = await readScreen(client, a.pane_id, 40);
             extra = `\nLast output:\n${trimTail(r.text, 15)}`;
           } catch (e) {
             if (!(e instanceof HerdrError && e.code === "timeout")) throw e;
@@ -292,7 +409,48 @@ export function createMcpServer(ctx: ToolContext): McpServer {
           status === "working"
             ? `Task delivered to ${agentLabel(a)} (${a.project_name}). The agent is working; get the result later with wait, status or read.`
             : `Task delivered to ${agentLabel(a)} (${a.project_name}). Already now: ${STATUS_WORD[status]}.${extra}`;
-        return text(msg, { agent: viewJson(a), delivered: true, status_after: status });
+        return text(msg, { agent: viewJson(a), delivered: true, delivered_at: new Date().toISOString(), status_after: status });
+  }
+
+  // -------------------------------------------------------------- deliveries
+  server.registerTool(
+    "deliveries",
+    {
+      title: "Recent task deliveries",
+      description:
+        "Lists tasks that send/spawn delivered recently (time, agent, text, request_id). Use it after a transport error or when unsure whether a task arrived, " +
+        "instead of sending again. Kept in memory since the service started (last " + MAX_DELIVERIES + ").",
+      inputSchema: {
+        target: z.string().optional().describe("Only deliveries to this agent (" + TARGET_HELP + ")"),
+        request_id: z.string().optional().describe("Only the delivery made with this request_id."),
+        minutes: z.number().int().min(1).max(24 * 60).optional().describe("Look back this many minutes (default 60)."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async (args) =>
+      run("deliveries", args, async () => {
+        const since = Date.now() - (args.minutes ?? 60) * 60_000;
+        let list = deliveries.filter((d) => d.at.getTime() >= since);
+        if (args.request_id) list = list.filter((d) => d.request_id === args.request_id);
+        if (args.target) {
+          const res = resolveTarget(await board(), cfg, args.target);
+          if (res.kind === "many") return text(describeMany(res.agents, res.reason), { candidates: res.agents.map(viewJson) }, true);
+          // An agent that is gone can still be matched by its old handle or pane id.
+          const pane = res.kind === "one" ? res.agent.pane_id : null;
+          const q = args.target.trim().toLowerCase();
+          list = list.filter((d) => d.pane_id === pane || d.handle.toLowerCase() === q || d.pane_id.toLowerCase() === q);
+        }
+        const window = `in the last ${args.minutes ?? 60} minutes`;
+        if (!list.length) {
+          const pending = args.request_id && sendRequests.has(args.request_id) ? " (a send with this request_id is still in progress)" : "";
+          return text(`No deliveries ${window}${args.request_id ? ` with request_id "${args.request_id}"` : ""}${args.target ? ` to "${args.target}"` : ""}${pending}.`, { deliveries: [] });
+        }
+        const lines = list.map(
+          (d) => `- ${clockSeconds(d.at)} → "${d.handle}" (${d.project}) via ${d.via}${d.outcome === "stalled" ? ", typed in but no reaction seen" : ""}${d.request_id ? `, request_id ${d.request_id}` : ""}: ${d.text.length > 160 ? d.text.slice(0, 160) + "…" : d.text}`,
+        );
+        return text(`${list.length} deliver${list.length === 1 ? "y" : "ies"} ${window}:\n${lines.join("\n")}`, {
+          deliveries: list.map((d) => ({ ...d, at: d.at.toISOString() })),
+        });
       }),
   );
 
@@ -305,7 +463,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         `Waits at most ${cfg.send.max_wait_seconds} seconds until an agent is ready, done or blocked, then returns state and last output. ` +
         "If time runs out the agent is still working – just call again later. For longer tasks status/standup is the better way.",
       inputSchema: {
-        target: z.string().describe("Agent name, pane ID, project or workspace label."),
+        target: z.string().describe(TARGET_HELP),
         timeout_seconds: z.number().int().min(1).max(cfg.send.max_wait_seconds).optional().describe(`Wait time in seconds (default ${Math.min(20, cfg.send.max_wait_seconds)}).`),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -321,7 +479,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         try {
           const after = await client.agentWait(a.pane_id, ["idle", "done", "blocked"], timeoutMs);
           tracker.observe(after);
-          const r = await client.agentRead(a.pane_id, 40);
+          const r = await readScreen(client, a.pane_id, 40);
           return text(`${agentLabel(a)} (${a.project_name}): ${STATUS_WORD[after.agent_status]}.\nLast output:\n${trimTail(r.text, 15)}`, {
             agent: viewJson(a),
             status: after.agent_status,
@@ -348,7 +506,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         "Answers a question or menu of a blocked agent with logical keys (enter, esc, y, n, up, down, 1-9, ctrl+c). " +
         "Check with read first what is being asked. Only for dialogs, not for dictating text – use send for that.",
       inputSchema: {
-        target: z.string().describe("Agent name, pane ID, project or workspace label."),
+        target: z.string().describe(TARGET_HELP),
         keys: z.array(z.string()).min(1).max(10).describe("Key sequence, e.g. ['y','enter'] or ['down','enter']."),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -366,7 +524,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         await new Promise((r) => setTimeout(r, 1500));
         const after = await client.agentGet(a.pane_id);
         tracker.observe(after);
-        const r = await client.agentRead(a.pane_id, 30);
+        const r = await readScreen(client, a.pane_id, 30);
         return text(
           `Sent keys ${args.keys.join(" ")} to ${agentLabel(a)}. State now: ${STATUS_WORD[after.agent_status]}.\nScreen:\n${trimTail(r.text, 15)}`,
           { agent: viewJson(a), status_after: after.agent_status },
@@ -471,6 +629,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         if (args.prompt) {
           try {
             await client.agentPrompt(pane_id, args.prompt);
+            recordDelivery({ at: new Date(), pane_id, handle: `${primary?.label ?? path.basename(root)}/${name}`, project: p.project.name, text: args.prompt, request_id: null, via: "spawn", outcome: "delivered" });
             promptNote = " The first task was delivered; the agent is working.";
           } catch (e) {
             promptNote = ` The first task could not be delivered (${errorText(e)}).`;
@@ -506,7 +665,8 @@ export function createMcpServer(ctx: ToolContext): McpServer {
               r.agents ? ` – ${Object.entries(r.by_status).map(([s, n]) => `${n} ${s}`).join(", ")}` : ""
             }`,
         );
-        return text(lines.length ? lines.join("\n") : "No projects allowed. Add them to the config under 'projects'.", { projects: rows });
+        const head = instance ? `Projects on ${instance}:\n` : "";
+        return text(head + (lines.length ? lines.join("\n") : "No projects allowed. Add them to the config under 'projects'."), { instance, projects: rows });
       }),
   );
 

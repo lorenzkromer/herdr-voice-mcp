@@ -33,20 +33,37 @@ export function agentLabel(a: AgentView): string {
   return `${who}${where}`;
 }
 
+/**
+ * How long the agent has been in its state. A state that was already present when the
+ * service started has no known start, so it is reported as "since before <start>" rather
+ * than as a duration that would look precise.
+ */
 export function sinceText(a: AgentView, tracker: Tracker, now = Date.now()): string {
   const t = tracker.get(a.pane_id);
   if (!t || !tracker.ready) return "";
-  const dur = humanDuration(now - t.since.getTime());
-  return t.previous === null ? ` (for at least ${dur})` : ` (for ${dur})`;
+  if (!t.exact) return ` (since before ${clock(tracker.startedAt, now)}, when the service started)`;
+  return ` (for ${humanDuration(now - t.since.getTime())})`;
 }
 
 export function agentLine(a: AgentView, tracker: Tracker, now = Date.now()): string {
   const topic = a.topic ? ` · topic: ${a.topic}` : "";
-  return `- ${a.project_name}: ${agentLabel(a)} [${a.kind ?? "?"}, ${a.pane_id}] ${STATUS_WORD[a.status]}${sinceText(a, tracker, now)}${topic}`;
+  return `- ${a.project_name}: "${a.handle}" (${a.kind ?? "?"}) ${STATUS_WORD[a.status]}${sinceText(a, tracker, now)}${topic}`;
 }
 
-export function clock(d = new Date()): string {
-  return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+/** Time of day; prefixed with "yesterday" or the date when it is not today. */
+export function clock(d = new Date(), now = Date.now()): string {
+  const hm = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const day = (x: Date) => x.toDateString();
+  const today = new Date(now);
+  if (day(d) === day(today)) return hm;
+  const yesterday = new Date(now - 86_400_000);
+  if (day(d) === day(yesterday)) return `yesterday ${hm}`;
+  return `${d.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} ${hm}`;
+}
+
+/** Time of day with seconds, for read stamps. */
+export function clockSeconds(d = new Date()): string {
+  return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -57,11 +74,16 @@ function capitalize(s: string): string {
   return s[0].toUpperCase() + s.slice(1);
 }
 
-export function formatBoard(agents: AgentView[], tracker: Tracker, opts: { hidden: number; attentionOnly?: boolean }): string {
+/** " on Office" when an instance name is configured, "" otherwise. */
+export function onInstance(instance: string | null | undefined): string {
+  return instance ? ` on ${instance}` : "";
+}
+
+export function formatBoard(agents: AgentView[], tracker: Tracker, opts: { hidden: number; attentionOnly?: boolean; instance?: string | null }): string {
   const now = Date.now();
   const attention = agents.filter((a) => a.status === "blocked" || a.status === "done");
   const projects = new Set(agents.map((a) => a.project));
-  const head = `Board at ${clock()}: ${plural(agents.length, "agent", "agents")} in ${plural(projects.size, "project", "projects")}, ${attention.length} need attention.`;
+  const head = `Board${onInstance(opts.instance)} at ${clock()}: ${plural(agents.length, "agent", "agents")} in ${plural(projects.size, "project", "projects")}, ${attention.length} need attention.`;
   const lines: string[] = [head];
   const shown = opts.attentionOnly ? attention : agents;
   for (const status of STATUS_ORDER) {
@@ -91,7 +113,22 @@ const CHROME = [
   /Update installed · Restart to update/,
   /^\s*\? for shortcuts/,
   /^\s*Esc to cancel · Tab to amend\s*$/,
+  /^[\s│┃|]*[╭╰┌└][─━\s]*[╮╯┐┘]?[\s│┃|]*$/, // top/bottom of an input box
+  /^\s*[│┃]\s*[>❯›]?\s*[│┃]\s*$/, // empty input box row
+  /^[\u2800-\u28ff\s]+$/, // braille spinner / logo art
+  /^\s*(?:shift\+tab|ctrl\+[a-z]) to /, // key hints
+  /^\s*\S+ (?:minimal|low|medium|high|xhigh) · [~/]/, // Codex footer: model · effort · cwd
+  /^\s*[⬆⚠].*│.*│/, // status bar with separators
+  /^\s*⎿\s+Tip: /, // Claude Code tips
 ];
+
+/**
+ * Progress lines whose spinners and timers tick every second ("✢ Gusting… (5m 52s · ↓ 32.5k tokens)",
+ * "Working (12s · esc to interrupt)"); kept for reading, ignored when comparing reads.
+ */
+export const PROGRESS = /\b(?:esc|Esc) to interrupt\b|^\s*\S\s+[^\s()]+(?:…|\.\.\.)\s*\(/;
+/** Trailing elapsed-time stamps on tool lines ("⏺ Running tests · 2s"). */
+export const ELAPSED = /\s+·\s+\d+(?:\.\d+)?\s*(?:ms|s|m|min)(?:\s+\d+s)?\s*$/;
 
 export function trimTail(text: string, maxLines: number): string {
   const lines = text
@@ -101,13 +138,13 @@ export function trimTail(text: string, maxLines: number): string {
   return lines.slice(-maxLines).join("\n");
 }
 
-export function formatStandup(items: StandupItem[], rest: AgentView[], tracker: Tracker, lastStandupAt: Date | null): string {
+export function formatStandup(items: StandupItem[], rest: AgentView[], tracker: Tracker, lastStandupAt: Date | null, instance?: string | null): string {
   const now = Date.now();
   const lines: string[] = [];
   const since = lastStandupAt ? `Since the last stand-up (${clock(lastStandupAt)})` : "First stand-up since the service started";
   const blocked = items.filter((i) => i.agent.status === "blocked");
   const done = items.filter((i) => i.agent.status === "done");
-  lines.push(`${since}: ${done.length} finished, ${blocked.length} waiting for a decision, ${rest.filter((a) => a.status === "working").length} still working.`);
+  lines.push(`Stand-up${onInstance(instance)}. ${since}: ${done.length} finished, ${blocked.length} waiting for a decision, ${rest.filter((a) => a.status === "working").length} still working.`);
 
   const section = (title: string, list: StandupItem[]) => {
     if (!list.length) return;

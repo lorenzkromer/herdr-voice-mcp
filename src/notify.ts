@@ -77,8 +77,16 @@ async function main() {
     return;
   }
   if (!n.enabled || n.provider === "none") {
-    log("notify.enabled is false or provider is none – nothing to do. Set it in the config and restart.");
-    process.exit(1);
+    // Stay alive but idle: exiting would make launchd (KeepAlive) restart us every few seconds.
+    log("notify.enabled is false or provider is none – idle. Set it in the config and restart this service.");
+    const idle = setInterval(() => {}, 2 ** 31 - 1);
+    const stop = () => {
+      clearInterval(idle);
+      process.exit(0);
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    return;
   }
 
   const client = new HerdrClient(cfg.socket);

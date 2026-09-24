@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatBoard, humanDuration, trimTail } from "../src/format.js";
+import { ELAPSED, formatBoard, humanDuration, PROGRESS, trimTail } from "../src/format.js";
 import type { AgentView } from "../src/projects.js";
 import { Tracker } from "../src/tracker.js";
 import { HerdrClient } from "../src/herdr.js";
@@ -21,6 +21,7 @@ test("trimTail drops rulers and blank lines", () => {
 test("formatBoard groups by status and counts attention", () => {
   const tracker = new Tracker(new HerdrClient("/nonexistent"));
   const mk = (pane_id: string, status: AgentView["status"], project_name = "Acme Web App"): AgentView => ({
+    instance: null,
     pane_id,
     workspace_id: "w1",
     tab_id: "w1:t1",
@@ -35,6 +36,7 @@ test("formatBoard groups by status and counts attention", () => {
     topic: "Checkout",
     state_change_seq: 1,
     focused: false,
+    handle: `acme-web/claude@${pane_id}`,
   });
   const out = formatBoard([mk("w1:p1", "blocked"), mk("w2:p1", "working"), mk("w3:p1", "done")], tracker, { hidden: 2 });
   assert.match(out, /3 agents in 1 project, 2 need attention/);
@@ -43,4 +45,28 @@ test("formatBoard groups by status and counts attention", () => {
   assert.match(out, /2 more agents run/);
   const attention = formatBoard([mk("w2:p1", "working")], tracker, { hidden: 0, attentionOnly: true });
   assert.match(attention, /Nobody needs anything right now/);
+  assert.match(formatBoard([], tracker, { hidden: 0, instance: "Control Room" }), /^Board on Control Room at /);
+});
+
+test("trimTail drops agent TUI chrome seen live", () => {
+  const screen = [
+    "⏺ Tests pass",
+    "╭────────────────╮",
+    "│ >              │",
+    "╰────────────────╯",
+    "         ⠄                            ⢀",
+    "  gpt-6-astra medium · ~/development/rudertrainer · Prüfe JEV",
+    "  ⎿  Tip: Run tasks in the cloud while you keep coding locally",
+    "  ⬆ /gsd-update │ ⚠ stale hooks — run /gsd-update │ Opus 5.5 (1M) │ repo 13%",
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents",
+  ].join("\n");
+  assert.equal(trimTail(screen, 10), "⏺ Tests pass");
+});
+
+test("progress lines and elapsed stamps are recognised for change detection", () => {
+  assert.ok(PROGRESS.test("✢ Gusting… (5m 52s · ↓ 32.5k tokens)"));
+  assert.ok(PROGRESS.test("• Working (12s • esc to interrupt)"));
+  assert.ok(!PROGRESS.test("⏺ Update(src/tools.ts)"));
+  assert.equal("⏺ Building the thing · 2s".replace(ELAPSED, ""), "⏺ Building the thing");
+  assert.equal("⏺ Ran 12 tests".replace(ELAPSED, ""), "⏺ Ran 12 tests");
 });

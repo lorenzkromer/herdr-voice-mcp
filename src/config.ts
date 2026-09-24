@@ -52,6 +52,11 @@ const NotifySchema = z.object({
 });
 
 export const ConfigSchema = z.object({
+  /**
+   * Speakable name of the Herdr instance this server controls, e.g. "Office". Shown in status,
+   * standup and projects, and accepted as a target prefix ("Office/shop/codex"). Optional.
+   */
+  instance_name: z.string().trim().min(1).max(40).optional(),
   /** Herdr API socket. */
   socket: z.string().default("~/.config/herdr/herdr.sock"),
   http: z
@@ -118,7 +123,7 @@ export const ConfigSchema = z.object({
   send: z
     .object({
       /** After delivery, wait this long for an immediate state (blocked/done/idle) before answering. Keep well below the client's transport timeout. */
-      settle_seconds: z.number().int().min(0).max(20).default(8),
+      settle_seconds: z.number().int().min(0).max(20).default(3),
       /** Upper bound for the `wait` tool. Claude's connector drops calls that take much longer than ~30 s. */
       max_wait_seconds: z.number().int().min(5).max(60).default(25),
       /** Refuse an identical prompt to the same agent within this window unless force=true. */

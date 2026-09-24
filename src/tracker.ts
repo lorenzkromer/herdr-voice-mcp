@@ -6,19 +6,32 @@
 // change (e.g. working → done is missing), but `pane.agent_status_changed`
 // does – and that subscription needs one entry per pane. So the tracker keeps
 // a per-pane subscription list and re-subscribes whenever agents come or go.
+//
+// `state_change_seq` is a Herdr-wide counter stamped on a pane at each of its
+// state changes. A pane whose seq moved while its status looks unchanged went
+// through transitions we did not see (e.g. done → working → done between two
+// polls); that counts as a change, too. When polling notices changes the event
+// stream should have delivered, the subscription is considered stale and is
+// rebuilt (heartbeat).
 
 import type { AgentInfo, AgentStatus, HerdrClient, HerdrEvent, PaneInfo } from "./herdr.js";
 
 export interface TrackedState {
   status: AgentStatus;
+  /** When the current state began. For states first seen at startup this is only a lower bound. */
   since: Date;
-  seq: number;
+  /** Last known `state_change_seq`; null after an event-driven change (events carry no seq). */
+  seq: number | null;
   previous: AgentStatus | null;
+  /** False when the state was already present at first sight, i.e. its real start is unknown. */
+  exact: boolean;
 }
 
 export type TransitionListener = (pane_id: string, from: AgentStatus | null, to: AgentStatus, pane: PaneInfo | AgentInfo) => void;
 
 const RESEED_INTERVAL_MS = 60_000;
+/** Changes found by polling within this long after (re)subscribing are expected, not a sign of a stale stream. */
+const SUBSCRIBE_GRACE_MS = 10_000;
 
 export class Tracker {
   private states = new Map<string, TrackedState>();
@@ -34,6 +47,9 @@ export class Tracker {
   lastStandupAt: Date | null = null;
   /** True once the first agent list has been seeded. */
   ready = false;
+  /** When the tracker started watching; states first seen at that point began before it. */
+  readonly startedAt = new Date();
+  private subscribedAt = 0;
 
   constructor(
     private readonly client: HerdrClient,
@@ -48,28 +64,35 @@ export class Tracker {
     return this.states.get(pane_id);
   }
 
-  /** Feed an observation; records a transition when the status differs. */
-  observe(pane: PaneInfo | AgentInfo, seedOnly = false): void {
+  /**
+   * Feed an observation; records a transition when the status differs or the
+   * pane's `state_change_seq` advanced. Returns true when a change was recorded.
+   */
+  observe(pane: PaneInfo | AgentInfo, seedOnly = false): boolean {
     const now = new Date();
-    const seq = (pane as AgentInfo).state_change_seq ?? 0;
+    const seq = (pane as AgentInfo).state_change_seq;
     const prev = this.states.get(pane.pane_id);
     // Merge, never replace: pane_updated payloads carry no `name`/`terminal_title` and must not wipe them.
     if ((pane as AgentInfo).terminal_id) this.meta.set(pane.pane_id, { ...(this.meta.get(pane.pane_id) ?? {}), ...pane } as AgentInfo);
     if (!prev) {
-      // First sight: we do not know when the agent entered this state, so "now" is a lower bound.
-      // During seeding nothing is reported (avoids a burst on startup); afterwards a new agent that
-      // is already blocked/done is a real event (e.g. a trust prompt right after spawn).
-      this.states.set(pane.pane_id, { status: pane.agent_status, since: now, seq, previous: null });
-      if (!seedOnly && this.ready) this.emit(pane.pane_id, null, pane.agent_status, pane);
-      return;
+      // First sight. During seeding the state predates us, so its start is unknown ("exact: false")
+      // and nothing is reported (avoids a burst on startup). Afterwards a new agent is really new,
+      // and one that is already blocked/done is a real event (e.g. a trust prompt right after spawn).
+      const fresh = !seedOnly && this.ready;
+      this.states.set(pane.pane_id, { status: pane.agent_status, since: now, seq: seq ?? null, previous: null, exact: fresh });
+      if (fresh) this.emit(pane.pane_id, null, pane.agent_status, pane);
+      return fresh;
     }
-    if (prev.status !== pane.agent_status) {
-      const from = prev.status;
-      this.states.set(pane.pane_id, { status: pane.agent_status, since: now, seq, previous: from });
-      if (!seedOnly) this.emit(pane.pane_id, from, pane.agent_status, pane);
-    } else if (seq > prev.seq) {
-      prev.seq = seq;
+    const statusChanged = prev.status !== pane.agent_status;
+    const missedChange = !statusChanged && seq != null && prev.seq != null && seq > prev.seq;
+    if (!statusChanged && !missedChange) {
+      if (seq != null) prev.seq = seq;
+      return false;
     }
+    const from = prev.status;
+    this.states.set(pane.pane_id, { status: pane.agent_status, since: now, seq: seq ?? null, previous: from, exact: true });
+    if (!seedOnly) this.emit(pane.pane_id, from, pane.agent_status, pane);
+    return true;
   }
 
   private emit(pane_id: string, from: AgentStatus | null, to: AgentStatus, pane: PaneInfo | AgentInfo): void {
@@ -93,10 +116,17 @@ export class Tracker {
     const agents = await this.client.agentList();
     const live = new Set(agents.map((a) => a.pane_id));
     const before = [...this.states.keys()].sort().join(",");
-    for (const a of agents) this.observe(a, !this.ready);
+    const known = new Set(this.states.keys());
+    let missed = 0;
+    for (const a of agents) if (this.observe(a, !this.ready) && known.has(a.pane_id)) missed++;
     for (const id of [...this.states.keys()]) if (!live.has(id)) this.forget(id);
     this.ready = true;
     const after = [...this.states.keys()].sort().join(",");
+    // Heartbeat: an open subscription should have reported these changes already.
+    if (missed && this.stop && this.subscribedAt && Date.now() - this.subscribedAt > SUBSCRIBE_GRACE_MS) {
+      this.log(`tracker: polling found ${missed} change(s) the event stream missed; resubscribing`);
+      this.resubscribe();
+    }
     return before !== after;
   }
 
@@ -148,6 +178,7 @@ export class Tracker {
       onOpen: () => {
         this.backoffMs = 1000;
         this.resubscribing = false;
+        this.subscribedAt = Date.now();
         this.log(`tracker: subscribed (${this.subscribedPanes.length} agent panes)`);
         // Re-seed after (re)connect so we do not miss transitions during the gap.
         this.seed()

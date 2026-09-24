@@ -96,8 +96,12 @@ async function main() {
     // One access-log line per request; a token in the path is masked.
     const t0 = Date.now();
     const shownPath = token ? url.pathname.replace(token, "<token>") : url.pathname;
+    // Why a request was rejected (set by the MCP transport's onerror); logged with the access line.
+    let rejection: string | null = null;
     res.on("finish", () => {
-      log(`${source} ${req.method} ${shownPath} → ${res.statusCode} ${Date.now() - t0}ms ua="${req.headers["user-agent"] ?? ""}" accept="${req.headers.accept ?? ""}"`);
+      const pv = req.headers["mcp-protocol-version"];
+      const extra = res.statusCode >= 400 ? `${pv ? ` protocol="${pv}"` : ""}${rejection ? ` reason="${rejection}"` : ""}` : "";
+      log(`${source} ${req.method} ${shownPath} → ${res.statusCode} ${Date.now() - t0}ms ua="${req.headers["user-agent"] ?? ""}" accept="${req.headers.accept ?? ""}"${extra}`);
     });
 
     if (killSwitchOn(cfg.kill_switch)) {
@@ -171,6 +175,11 @@ async function main() {
 
     const mcp = createMcpServer({ cfg, client, tracker, audit, source: `${source} ${who}` });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    // The SDK answers malformed or unsupported requests with 400 itself; without this the reason is lost.
+    transport.onerror = (e) => {
+      rejection = e.message;
+      audit.record({ kind: "http", name: endpoint, source, outcome: "error", error: `mcp transport: ${e.message}` });
+    };
     res.on("close", () => {
       transport.close().catch(() => {});
       mcp.close().catch(() => {});
