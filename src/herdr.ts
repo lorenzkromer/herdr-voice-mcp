@@ -262,9 +262,10 @@ export class HerdrClient {
     target: string,
     text: string,
     wait?: { until?: AgentStatus[]; timeout_ms?: number },
+    socketTimeoutMs = 20_000,
   ): Promise<AgentInfo> {
     const params: Record<string, unknown> = { target, text };
-    let socketTimeout = 20_000;
+    let socketTimeout = socketTimeoutMs;
     if (wait) {
       params.wait = { until: wait.until ?? [], timeout_ms: wait.timeout_ms ?? null };
       socketTimeout = (wait.timeout_ms ?? 600_000) + 10_000;

@@ -173,6 +173,36 @@ export function assignHandles(agents: AgentView[]): void {
   for (const a of agents) a.handle = counts.get(normalizeQuery(base(a)))! > 1 ? `${base(a)}@${a.pane_id}` : base(a);
 }
 
+/**
+ * The workspace `spawn` should add a tab to, or null to create a new one. In order:
+ *   1. Herdr's worktree info says it is the project's primary checkout;
+ *   2. its label names the project (key, name, root basename or alias; spoken-name
+ *      tolerant, so "Herdr Voice MCP" matches "herdr-voice-mcp");
+ *   3. it already hosts an agent working in the project root. Automation run
+ *      workspaces ("auto: ...") are skipped here; they come and go per run.
+ */
+export function findProjectWorkspace(
+  workspaces: WorkspaceInfo[],
+  agents: Pick<AgentInfo, "workspace_id" | "cwd" | "foreground_cwd">[],
+  key: string,
+  project: ProjectConfig,
+  root: string,
+): WorkspaceInfo | null {
+  const byWorktree = workspaces.find((w) => w.worktree && !w.worktree.is_linked_worktree && path.resolve(w.worktree.repo_root) === root);
+  if (byWorktree) return byWorktree;
+  const names = new Set([key, project.name, path.basename(root), ...project.aliases].map(normalizeQuery));
+  const byLabel = workspaces.find((w) => !w.worktree?.is_linked_worktree && names.has(normalizeQuery(w.label)));
+  if (byLabel) return byLabel;
+  const counts = new Map<string, number>();
+  for (const a of agents) {
+    const cwd = a.cwd ?? a.foreground_cwd;
+    if (cwd && path.resolve(cwd) === root) counts.set(a.workspace_id, (counts.get(a.workspace_id) ?? 0) + 1);
+  }
+  const candidates = workspaces.filter((w) => counts.has(w.workspace_id) && !w.worktree?.is_linked_worktree && !/^auto:/i.test(w.label));
+  candidates.sort((a, b) => counts.get(b.workspace_id)! - counts.get(a.workspace_id)!);
+  return candidates[0] ?? null;
+}
+
 /** Herdr generates tab labels like "1 · codex › Fix login | repo"; only short hand-set labels make good handles. */
 function isCustomTabLabel(label: string | null): label is string {
   return !!label && label.length <= 24 && !/[·›|]/.test(label) && !/^\d+$/.test(label.trim());

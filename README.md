@@ -54,11 +54,11 @@ signal, Claude gives you the content.
 | `status` | Board of all allowed agents: status, project, workspace, time in the current state. `only: "attention"` limits it to blocked and done. | "How are things?" |
 | `standup` | Finished and blocked agents with their last output lines. Remembers the time, so the next stand-up can tell new items from known ones. | "Let's do a stand-up." |
 | `read` | Last lines of one agent's terminal, also while it works. Says when it read and whether the screen changed since the previous read. | "What is the backend agent asking?" |
-| `send` | Delivers a prompt to an agent and acknowledges immediately. Watches a few seconds for an instant question or answer. A retry with the same `request_id` returns the first result instead of delivering twice. Refuses an identical prompt to the same agent for 15 minutes unless `force` is set. Refuses while the agent is blocked. | "Tell the web agent to run the tests." |
-| `deliveries` | Recent deliveries by `send` and `spawn`, filterable by agent or `request_id`. For "did my task arrive?" after a dropped connection. | "Did the web agent get the task?" |
+| `send` | Delivers a prompt to an agent. Waits up to 15 seconds while the agent is not ready for input yet, then reports one of: delivered, outcome unknown, or not delivered. Watches a few seconds for an instant question or answer. A retry with the same `request_id` returns the first result instead of delivering twice. Refuses an identical prompt to the same agent for 15 minutes unless `force` is set. Refuses while the agent is blocked. | "Tell the web agent to run the tests." |
+| `deliveries` | Recent handovers by `send`, `spawn` and `keys` with their outcome (delivered, unknown, not delivered), filterable by agent or `request_id`. For "did my task arrive?" after a dropped connection. | "Did the web agent get the task?" |
 | `wait` | Waits at most 25 seconds until an agent is ready, done or blocked. | "Is it done yet?" |
-| `keys` | Sends logical keys to a blocked agent's dialog: `enter`, `esc`, `y`, `n`, arrows, `1`–`9`, `ctrl+c`. | "Say yes." / "Pick option two." |
-| `spawn` | Starts a new agent of an allowed kind in an allowed project, in a new tab or workspace, optionally with a first task. | "Start a Codex in the shop project." |
+| `keys` | Sends logical keys to a blocked agent's dialog: `enter`, `esc`, `y`, `n`, arrows, `1`–`9`, `ctrl+c`. Never retried; `request_id` prevents a second key press on a retry. | "Say yes." / "Pick option two." |
+| `spawn` | Starts a new agent of an allowed kind in an allowed project, as a new tab in the project's open workspace (or a new workspace), optionally with a first task that is handed over once the agent is ready. Says explicitly when only the agent started and the task still has to be sent. `request_id` prevents a second agent on a retry. | "Start a Codex in the shop project." |
 | `projects` | Lists the allowed projects with keys and aliases. | "Which projects do you know?" |
 
 Every agent has a stable, speakable handle, `<workspace>/<name, tab label or

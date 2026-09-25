@@ -4,7 +4,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { parseConfig } from "../src/config.js";
 import type { WorkspaceInfo } from "../src/herdr.js";
-import { assignHandles, matchProject, projectForAgent, resolveTarget, type AgentView, type Board } from "../src/projects.js";
+import { assignHandles, findProjectWorkspace, matchProject, projectForAgent, resolveTarget, type AgentView, type Board } from "../src/projects.js";
 
 const home = os.homedir();
 const cfg = parseConfig({
@@ -166,4 +166,19 @@ test("resolveTarget: an instance prefix narrows and is stripped", () => {
   assert.equal(resolveTarget(board, named, "Control Room").kind, "many");
   // Without the prefix everything works as before.
   assert.equal(one(resolveTarget(board, named, "acme-web/codex")), "w1:p1");
+});
+
+test("findProjectWorkspace: label variants, then agents in the root; automation workspaces skipped", () => {
+  const root = path.join(home, "development/acme-web");
+  const p = cfg.projects.acme;
+  assert.equal(findProjectWorkspace([ws("w2", "other"), ws("w3", "Acme-Web")], [], "acme", p, root)?.workspace_id, "w3");
+  const agents = [
+    { workspace_id: "w5", cwd: root },
+    { workspace_id: "w6", cwd: root },
+    { workspace_id: "w6", cwd: root },
+    { workspace_id: "w7", cwd: path.join(root, "sub") },
+  ];
+  const list = [ws("w5", "auto: nightly"), ws("w6", "my desk"), ws("w7", "elsewhere")];
+  assert.equal(findProjectWorkspace(list, agents, "acme", p, root)?.workspace_id, "w6");
+  assert.equal(findProjectWorkspace([ws("w5", "auto: nightly")], agents, "acme", p, root), null);
 });
