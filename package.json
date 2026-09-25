@@ -47,6 +47,7 @@
     "dist",
     "config.example.json",
     "launchd",
+    "systemd",
     "scripts",
     "README.md",
     "CHANGELOG.md",

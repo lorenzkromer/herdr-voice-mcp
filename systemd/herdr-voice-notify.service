@@ -1,0 +1,16 @@
+# systemd user unit for the notifier on Linux; see herdr-voice-mcp.service.
+[Unit]
+Description=herdr-voice-mcp: push notifications for Herdr agents
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/herdr-voice-mcp
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AGENCY_CONFIG=%h/.config/agency/config.json
+ExecStart=/usr/bin/env node dist/notify.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

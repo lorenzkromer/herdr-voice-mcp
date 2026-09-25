@@ -1,0 +1,19 @@
+# systemd user unit for the MCP server on Linux.
+#   cp systemd/*.service ~/.config/systemd/user/   (paths assume the checkout in ~/services/herdr-voice-mcp)
+#   systemctl --user daemon-reload && systemctl --user enable --now herdr-voice-mcp herdr-voice-notify
+#   loginctl enable-linger $USER   # keep running without a login session
+[Unit]
+Description=herdr-voice-mcp: MCP server for voice control of Herdr agents
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/herdr-voice-mcp
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AGENCY_CONFIG=%h/.config/agency/config.json
+ExecStart=/usr/bin/env node dist/server.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

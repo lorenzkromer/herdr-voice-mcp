@@ -15,7 +15,9 @@
   `instance` argument and `<instance>/<project>` form.
 - `projects` lists each machine; the notifier watches all machines.
 - `scripts/tunnel.sh` and a launchd template keep an SSH socket forward up
-  with a forward-only key.
+  with a forward-only key, in either direction (`install-reverse` lets a
+  server on another machine reach this one).
+- systemd user units for running server and notifier on Linux.
 
 ## 0.2.0 – 2026-09-25
 

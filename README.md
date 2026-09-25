@@ -141,7 +141,8 @@ scripts/install-launchd.sh status
 ```
 
 Logs go to `~/Library/Logs/herdr-voice-server.log` and
-`~/Library/Logs/herdr-voice-notify.log`. After a config change run
+`~/Library/Logs/herdr-voice-notify.log`. On Linux, `systemd/` has user units for
+the server and the notifier (instructions in the unit file). After a config change run
 `scripts/install-launchd.sh restart`.
 
 The HTTP server listens on `127.0.0.1:8791` by default. Test it with:
@@ -307,6 +308,12 @@ The remote Herdr socket is forwarded to the local path over SSH:
 3. `scripts/tunnel.sh install home me@home-box /home/me/.config/herdr/herdr.sock`
    installs a launchd agent that keeps the tunnel up and reconnects.
 4. Add the instance to the config and restart the server.
+
+The server can also run on the always-on machine and reach a laptop the
+other way round: `scripts/tunnel.sh install-reverse <slug> <user@server-host>
+<socket-path-on-server>` run on the laptop makes the laptop's Herdr socket
+appear on the server (the server's sshd needs `StreamLocalBindUnlink yes`).
+While the laptop sleeps, its instance is simply reported as not reachable.
 
 How it behaves:
 
