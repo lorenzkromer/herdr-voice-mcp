@@ -58,7 +58,7 @@ signal, Claude gives you the content.
 | `deliveries` | Recent handovers by `send`, `spawn` and `keys` with their outcome (delivered, unknown, not delivered), filterable by agent or `request_id`. For "did my task arrive?" after a dropped connection. | "Did the web agent get the task?" |
 | `wait` | Waits at most 25 seconds until an agent is ready, done or blocked. | "Is it done yet?" |
 | `keys` | Sends logical keys to a blocked agent's dialog: `enter`, `esc`, `y`, `n`, arrows, `1`–`9`, `ctrl+c`. Never retried; `request_id` prevents a second key press on a retry. | "Say yes." / "Pick option two." |
-| `spawn` | Starts a new agent of an allowed kind in an allowed project, as a new tab in the project's open workspace (or a new workspace), optionally with a first task that is handed over once the agent is ready. Says explicitly when only the agent started and the task still has to be sent. `request_id` prevents a second agent on a retry. | "Start a Codex in the shop project." |
+| `spawn` | Starts a new agent of an allowed kind in an allowed project, as a new tab in the project's open workspace (or a new workspace), or with `placement` in its own workspace (`workspace`) or its own Git worktree workspace on a new branch, grouped under the project (`worktree`). A new workspace never gets a label that sounds like an existing one. Optionally with a first task that is handed over once the agent is ready. Says explicitly when only the agent started and the task still has to be sent. `request_id` prevents a second agent on a retry. | "Start a Codex in the shop project." |
 | `projects` | Lists the allowed projects with keys and aliases. | "Which projects do you know?" |
 
 Every agent has a stable, speakable handle, `<workspace>/<name, tab label or

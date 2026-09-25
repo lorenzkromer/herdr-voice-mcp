@@ -27,6 +27,8 @@ let keysSent: string[][] = [];
 let tabsCreated = 0;
 let workspacesCreated = 0;
 let started: string[] = [];
+let workspaceLabels: string[] = [];
+let worktreeCalls: Array<Record<string, unknown>> = [];
 
 const agentInfo = () => ({
   terminal_id: "t1", pane_id: "w1:p1", tab_id: "w1:t1", workspace_id: "w1", agent: "claude", name: null,
@@ -59,7 +61,15 @@ before(async () => {
         case "agent.send_keys": keysSent.push(req.params.keys); return reply({});
         case "agent.wait": return fail("timeout");
         case "tab.create": tabsCreated++; return reply({ tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } });
-        case "workspace.create": workspacesCreated++; return reply({ workspace: { workspace_id: "w9", label: req.params.label }, tab: { tab_id: "w9:t1" }, root_pane: { pane_id: "w9:p1" } });
+        case "worktree.create":
+          worktreeCalls.push(req.params);
+          return reply({
+            workspace: { workspace_id: "w8", label: req.params.label, worktree: { repo_root: "x", is_linked_worktree: true } },
+            tab: { tab_id: "w8:t1" },
+            root_pane: { pane_id: "w8:p1" },
+            worktree: { path: `/tmp/wt/${req.params.branch}`, branch: req.params.branch },
+          });
+        case "workspace.create": workspaceLabels.push(req.params.label); workspacesCreated++; return reply({ workspace: { workspace_id: "w9", label: req.params.label }, tab: { tab_id: "w9:t1" }, root_pane: { pane_id: "w9:p1" } });
         case "agent.start": started.push(req.params.name); return reply({ agent: { ...agentInfo(), pane_id: req.params.pane_id, name: req.params.name, agent_status: "idle" } });
         case "agent.read": return fail("agent_not_idle");
         case "pane.read": return reply({ read: { pane_id: "w1:p1", workspace_id: "w1", tab_id: "w1:t1", source: req.params.source, format: "text", text: screen + "\n✻ Working… (12s · esc to interrupt)\n", revision: 1, truncated: false } });
@@ -207,4 +217,53 @@ test("keys with the same request_id are pressed only once", async () => {
   assert.equal((again.structuredContent as { replayed: boolean }).replayed, true);
   const d = await c.callTool({ name: "deliveries", arguments: { request_id: "keys-1" } });
   assert.match(textOf(d), /via keys: delivered.*: y enter/);
+});
+
+test("spawn placement=workspace: own workspace, labelled after the agent", async () => {
+  const c = await connect();
+  const before = workspacesCreated;
+  const r = await c.callTool({ name: "spawn", arguments: { project: "acme", name: "solo", placement: "workspace" } });
+  assert.equal(r.isError, undefined, textOf(r));
+  assert.equal(workspacesCreated, before + 1);
+  assert.equal(workspaceLabels.at(-1), "solo");
+  assert.equal((r.structuredContent as { handle: string }).handle, "solo/solo");
+});
+
+test("spawn never creates a workspace that sounds like an existing one", async () => {
+  const c = await connect();
+  const before = workspacesCreated;
+  // Explicit label that only differs in spelling from "Acme Web": refused, nothing created.
+  const refused = await c.callTool({ name: "spawn", arguments: { project: "acme", name: "x1", placement: "workspace", label: "acme-web" } });
+  assert.equal(refused.isError, true);
+  assert.match(textOf(refused), /already exists/);
+  assert.equal(workspacesCreated, before);
+  // Generated label from the agent name: gets a suffix instead.
+  const r = await c.callTool({ name: "spawn", arguments: { project: "acme", name: "acme-web", placement: "workspace" } });
+  assert.equal(r.isError, undefined, textOf(r));
+  assert.equal(workspaceLabels.at(-1), "acme-web-2");
+});
+
+test("spawn placement=worktree: own branch and checkout, first task delivered", async () => {
+  const c = await connect();
+  const before = prompts;
+  const r = await c.callTool({ name: "spawn", arguments: { project: "acme", name: "feature-login", placement: "worktree", prompt: "build the login" } });
+  assert.equal(r.isError, undefined, textOf(r));
+  const call = worktreeCalls.at(-1)!;
+  assert.equal(call.branch, "feature-login");
+  assert.equal(call.label, "feature-login");
+  assert.equal(call.focus, false);
+  assert.equal(prompts, before + 1);
+  assert.match(textOf(r), /worktree workspace "feature-login" \(branch feature-login\).*directory \/tmp\/wt\/feature-login/s);
+  const sc = r.structuredContent as { created: { kind: string; branch: string } };
+  assert.equal(sc.created.kind, "worktree");
+  const bare = await c.callTool({ name: "spawn", arguments: { project: "acme", name: "feature-bare", placement: "worktree" } });
+  assert.match(textOf(bare), /directory \/tmp\/wt\/feature-bare\. It has no task yet/);
+});
+
+test("spawn placement=worktree rejects unsafe branch names before creating anything", async () => {
+  const c = await connect();
+  const n = worktreeCalls.length;
+  const r = await c.callTool({ name: "spawn", arguments: { project: "acme", name: "bad-branch", placement: "worktree", branch: "../escape" } });
+  assert.equal(r.isError, true);
+  assert.equal(worktreeCalls.length, n);
 });

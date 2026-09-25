@@ -301,6 +301,15 @@ export class HerdrClient {
     return this.call("workspace.create", { label, cwd, focus: false });
   }
 
+  /**
+   * Creates a Git worktree (new branch, own checkout) and opens it as a workspace that Herdr
+   * groups under the repository's primary workspace. Pass the primary `workspace_id`, or a
+   * `cwd` inside the repository.
+   */
+  async worktreeCreate(opts: { workspace_id?: string; cwd?: string; branch: string; label?: string; base?: string }, timeoutMs = 30_000): Promise<{ workspace: WorkspaceInfo; tab: TabInfo; root_pane: PaneInfo; worktree: { path: string; branch: string } }> {
+    return this.call("worktree.create", { ...opts, focus: false }, timeoutMs);
+  }
+
   async workspaceClose(workspace_id: string): Promise<void> {
     await this.call("workspace.close", { workspace_id });
   }
