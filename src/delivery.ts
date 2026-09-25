@@ -80,6 +80,8 @@ export async function handOver(client: HerdrClient, pane_id: string, text: strin
 
 export interface Delivery {
   at: Date;
+  /** Herdr instance of the agent; pane ids repeat across instances. */
+  instance: string | null;
   pane_id: string;
   handle: string;
   project: string;

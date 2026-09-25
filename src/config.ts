@@ -25,6 +25,16 @@ const ProjectSchema = z.object({
   default_kind: z.string().optional(),
 });
 
+const RemoteInstanceSchema = z.object({
+  /** Speakable name, e.g. "Home". Must differ from instance_name and the other instances. */
+  name: z.string().trim().min(1).max(40),
+  /** Local path of this instance's Herdr socket, usually forwarded over SSH. */
+  socket: z.string().min(1),
+  /** Projects on that machine. Roots are paths on the remote machine and must be absolute. */
+  projects: z.record(z.string(), ProjectSchema).prefault({}),
+  worktree_patterns: z.array(z.string()).default([]),
+});
+
 const NotifySchema = z.object({
   enabled: z.boolean().default(false),
   /** log = only write to the audit log / stderr (for testing the watcher without a phone). */
@@ -131,11 +141,18 @@ export const ConfigSchema = z.object({
     })
     .prefault({}),
   notify: NotifySchema.prefault({}),
+  /**
+   * Further Herdr instances on other machines (see docs/design/multi-instance.md). The local
+   * instance is described by the top-level instance_name, socket and projects; instance_name
+   * is required once this list is not empty.
+   */
+  instances: z.array(RemoteInstanceSchema).default([]),
 });
 
 export type AgencyConfig = z.infer<typeof ConfigSchema>;
 export type ProjectConfig = z.infer<typeof ProjectSchema>;
 export type NotifyConfig = z.infer<typeof NotifySchema>;
+export type RemoteInstanceConfig = z.infer<typeof RemoteInstanceSchema>;
 
 export interface LoadedConfig extends AgencyConfig {
   configPath: string | null;
@@ -149,6 +166,24 @@ function normalize(cfg: AgencyConfig): AgencyConfig {
   for (const p of Object.values(cfg.projects)) {
     p.root = path.resolve(expandHome(p.root));
     p.extra_roots = p.extra_roots.map((r) => path.resolve(expandHome(r)));
+  }
+  if (cfg.instances.length) {
+    if (!cfg.instance_name) throw new Error("instance_name must be set when instances are configured");
+    const seen = new Set([cfg.instance_name.toLowerCase()]);
+    for (const inst of cfg.instances) {
+      const key = inst.name.toLowerCase();
+      if (seen.has(key)) throw new Error(`instance name "${inst.name}" is used twice`);
+      seen.add(key);
+      inst.socket = expandHome(inst.socket);
+      for (const [pk, p] of Object.entries(inst.projects)) {
+        // Remote paths: "~" would mean this machine's home, which is wrong there.
+        for (const r of [p.root, ...p.extra_roots]) {
+          if (!path.isAbsolute(r)) throw new Error(`instances.${inst.name}.projects.${pk}: root "${r}" must be an absolute path on that machine`);
+        }
+        p.root = path.resolve(p.root);
+        p.extra_roots = p.extra_roots.map((r) => path.resolve(r));
+      }
+    }
   }
   if (!cfg.auth.token && process.env.AGENCY_TOKEN) cfg.auth.token = process.env.AGENCY_TOKEN;
   if (cfg.public_url) cfg.public_url = cfg.public_url.replace(/\/+$/, "");

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Several machines
+- One server controls the agents on several Herdr instances with one merged
+  board: `instances` in the config, each with its own socket (forwarded over
+  SSH), projects, Herdr client and tracker.
+- Handles start with the instance name; targets that match on more than one
+  machine are ambiguous, including repeated pane ids and workspace names.
+- An instance that does not answer is reported as not reachable instead of
+  failing the call; meanwhile `send`, `keys` and `spawn` only accept targets
+  that name their machine.
+- `spawn` starts on the only machine that has the project, or asks; new
+  `instance` argument and `<instance>/<project>` form.
+- `projects` lists each machine; the notifier watches all machines.
+- `scripts/tunnel.sh` and a launchd template keep an SSH socket forward up
+  with a forward-only key.
+
 ## 0.2.0 – 2026-09-25
 
 Fixes and features from the first days of daily voice use.

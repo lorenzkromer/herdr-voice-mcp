@@ -71,9 +71,8 @@ word that is one agent's name and another agent's workspace, Claude gets the
 list of candidates and asks back.
 
 With `instance_name` set (for example `Office`), a target may start with it:
-`Office/shop-backend/codex`. One server controls one Herdr instance today; see
-[docs/design/multi-instance.md](docs/design/multi-instance.md) for the plan to
-control several machines from one board.
+`Office/shop-backend/codex`. One server can also control several machines;
+see Several machines.
 
 Times in `status` and `standup` are measured from the observed state change.
 A state that already existed when the service started is reported as
@@ -277,6 +276,55 @@ The notifier subscribes to Herdr's per-pane `pane.agent_status_changed`
 events. It only reports agents in allowed projects, and it debounces repeated
 transitions of the same pane.
 
+## Several machines
+
+One server can control the agents on several machines that each run Herdr,
+with one board for all of them. The local machine is described by the
+top-level `instance_name`, `socket` and `projects`; every other machine is an
+entry in `instances` with its own name, socket and projects. Remote project
+roots are paths on that machine and must be absolute.
+
+```json
+"instance_name": "Office",
+"instances": [
+  {
+    "name": "Home",
+    "socket": "~/.config/agency/home.sock",
+    "projects": { "shop": { "name": "Shop Backend", "root": "/home/me/development/shop-backend" } }
+  }
+]
+```
+
+The remote Herdr socket is forwarded to the local path over SSH:
+
+1. Run Herdr as a server on the remote machine, ideally as a service so it
+   survives reboots (for example a systemd user unit running `herdr server`
+   with lingering enabled). `herdr machine add` from your desk sets up the
+   remote Herdr and also shows the machine in Herdr's own sidebar.
+2. `scripts/tunnel.sh key home` creates a dedicated key and prints the line
+   for the remote `authorized_keys`. It only allows forwarding: no shell, no
+   commands.
+3. `scripts/tunnel.sh install home me@home-box /home/me/.config/herdr/herdr.sock`
+   installs a launchd agent that keeps the tunnel up and reconnects.
+4. Add the instance to the config and restart the server.
+
+How it behaves:
+
+- Handles start with the instance name (`Home/shop-backend/codex`). Short
+  targets still work while they are unique across all machines.
+- Pane ids and workspace names repeat across machines; a target that matches
+  on more than one machine is reported as ambiguous.
+- A machine that does not answer within 5 seconds is reported as not
+  reachable; the board still shows the others. While one is unreachable,
+  `send`, `keys` and `spawn` only accept targets that name their machine.
+- `spawn` starts on the only machine that has the project, or asks when
+  several have it (`Home/shop`, or the `instance` argument).
+- The notifier watches all machines and puts the machine name into the push
+  title.
+
+The design and its trade-offs are in
+[docs/design/multi-instance.md](docs/design/multi-instance.md).
+
 ## Security model
 
 This service forwards instructions to agents that can write to your
@@ -310,6 +358,7 @@ that is acceptable for your code and your clients.
 |---|---|---|
 | `instance_name` | none | Speakable name of this Herdr instance, e.g. `Office`. Shown in `status`, `standup` and `projects`, accepted as a target prefix (`Office/shop/codex`) |
 | `socket` | `~/.config/herdr/herdr.sock` | Herdr API socket |
+| `instances` | `[]` | Further Herdr instances: `name`, `socket`, `projects` (absolute remote roots), optional `worktree_patterns`. Requires `instance_name`. See Several machines |
 | `http.host` | `127.0.0.1` | Address or list of addresses to listen on |
 | `http.port` | `8791` | Port |
 | `http.path` | `/mcp` | Endpoint path |
@@ -370,8 +419,6 @@ come from `$AGENCY_TOKEN`.
 
 - Real authentication on every setup path, no secrets in URLs
   ([#1](https://github.com/lorenzkromer/herdr-voice-mcp/issues/1)).
-- One server for several Herdr instances with a merged board, see
-  [docs/design/multi-instance.md](docs/design/multi-instance.md).
 - End-to-end OAuth login from the Claude app, and a decision on dynamic
   client registration.
 - Verifying the reverse proxy and VPN route, including reconnect after sleep.

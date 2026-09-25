@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>io.github.herdr-voice-mcp.tunnel.__SLUG__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>IdentitiesOnly=yes</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>StreamLocalBindUnlink=yes</string>
+    <string>-o</string><string>ServerAliveInterval=15</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-o</string><string>ConnectTimeout=10</string>
+    <string>-i</string><string>__HOME__/.ssh/agency-__SLUG__</string>
+    <string>-L</string><string>__HOME__/.config/agency/__SLUG__.sock:__REMOTE_SOCKET__</string>
+    <string>__TARGET__</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/herdr-voice-tunnel-__SLUG__.log</string>
+</dict>
+</plist>

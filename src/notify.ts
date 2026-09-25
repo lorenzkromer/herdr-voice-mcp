@@ -8,9 +8,9 @@
 
 import { Audit } from "./audit.js";
 import { loadConfig, type NotifyConfig } from "./config.js";
-import { HerdrClient, type AgentInfo, type AgentStatus, type PaneInfo } from "./herdr.js";
+import type { AgentInfo, AgentStatus, HerdrClient, PaneInfo } from "./herdr.js";
+import { instancesFromConfig } from "./fleet.js";
 import { projectForAgent } from "./projects.js";
-import { Tracker } from "./tracker.js";
 
 interface Push {
   title: string;
@@ -89,55 +89,60 @@ async function main() {
     return;
   }
 
-  const client = new HerdrClient(cfg.socket);
-  const tracker = new Tracker(client, log);
+  const instances = instancesFromConfig(cfg, log);
+  const multi = instances.length > 1;
   const lastSent = new Map<string, number>();
-  let workspaceCache: Awaited<ReturnType<HerdrClient["workspaceList"]>> = [];
-  let workspaceCacheAt = 0;
 
-  const workspaces = async () => {
-    if (Date.now() - workspaceCacheAt > 30_000) {
-      try {
-        workspaceCache = await client.workspaceList();
-        workspaceCacheAt = Date.now();
-      } catch (e) {
-        log(`workspace.list failed: ${(e as Error).message}`);
+  for (const inst of instances) {
+    const { client, tracker } = inst;
+    let workspaceCache: Awaited<ReturnType<HerdrClient["workspaceList"]>> = [];
+    let workspaceCacheAt = 0;
+    const workspaces = async () => {
+      if (Date.now() - workspaceCacheAt > 30_000) {
+        try {
+          workspaceCache = await client.workspaceList();
+          workspaceCacheAt = Date.now();
+        } catch (e) {
+          log(`${inst.name ? `${inst.name}: ` : ""}workspace.list failed: ${(e as Error).message}`);
+        }
       }
-    }
-    return workspaceCache;
-  };
+      return workspaceCache;
+    };
 
-  tracker.onTransition(async (pane_id, from, to, pane) => {
-    if (!n.on.includes(to as "done" | "blocked")) return;
-    const wsList = await workspaces();
-    const ws = wsList.find((w) => w.workspace_id === pane.workspace_id) ?? null;
-    const projectKey = projectForAgent(cfg, pane as AgentInfo | PaneInfo, ws);
-    if (!projectKey) return; // outside the whitelist
-    const now = Date.now();
-    const last = lastSent.get(pane_id) ?? 0;
-    if (now - last < n.debounce_seconds * 1000) return;
-    lastSent.set(pane_id, now);
+    tracker.onTransition(async (pane_id, from, to, pane) => {
+      if (!n.on.includes(to as "done" | "blocked")) return;
+      const wsList = await workspaces();
+      const ws = wsList.find((w) => w.workspace_id === pane.workspace_id) ?? null;
+      const projectKey = projectForAgent(inst.cfg, pane as AgentInfo | PaneInfo, ws);
+      if (!projectKey) return; // outside the whitelist
+      const now = Date.now();
+      // Pane ids repeat across instances.
+      const key = `${inst.name ?? ""}\u0000${pane_id}`;
+      const last = lastSent.get(key) ?? 0;
+      if (now - last < n.debounce_seconds * 1000) return;
+      lastSent.set(key, now);
 
-    const project = cfg.projects[projectKey].name;
-    const name = (pane as AgentInfo).name ?? ws?.label ?? pane_id;
-    const topic = (pane as AgentInfo).terminal_title_stripped ?? (pane as PaneInfo).title ?? null;
-    const push: Push =
-      to === "blocked"
-        ? { title: `${project}: decision needed`, body: `${name} is waiting for an answer${topic ? ` – ${topic}` : ""}.`, priority: "high", tags: ["question"] }
-        : { title: `${project}: finished`, body: `${name} is done${topic ? ` – ${topic}` : ""}. Ask Claude: "What's new?"`, priority: "default", tags: ["white_check_mark"] };
-    try {
-      await sendPush(n, push);
-      if (n.herdr_toast) await client.notificationShow(push.title, push.body, to === "blocked" ? "request" : "done").catch(() => {});
-      audit.record({ kind: "notify", name: to as AgentStatus, outcome: "ok", detail: `${project}/${name} ${from ?? "?"}→${to}` });
-    } catch (e) {
-      audit.record({ kind: "notify", name: to as AgentStatus, outcome: "error", error: (e as Error).message });
-    }
-  });
+      const project = `${multi && inst.name ? `${inst.name} · ` : ""}${inst.cfg.projects[projectKey].name}`;
+      const name = (pane as AgentInfo).name ?? ws?.label ?? pane_id;
+      const topic = (pane as AgentInfo).terminal_title_stripped ?? (pane as PaneInfo).title ?? null;
+      const push: Push =
+        to === "blocked"
+          ? { title: `${project}: decision needed`, body: `${name} is waiting for an answer${topic ? ` – ${topic}` : ""}.`, priority: "high", tags: ["question"] }
+          : { title: `${project}: finished`, body: `${name} is done${topic ? ` – ${topic}` : ""}. Ask Claude: "What's new?"`, priority: "default", tags: ["white_check_mark"] };
+      try {
+        await sendPush(n, push);
+        if (n.herdr_toast) await client.notificationShow(push.title, push.body, to === "blocked" ? "request" : "done").catch(() => {});
+        audit.record({ kind: "notify", name: to as AgentStatus, outcome: "ok", detail: `${project}/${name} ${from ?? "?"}→${to}` });
+      } catch (e) {
+        audit.record({ kind: "notify", name: to as AgentStatus, outcome: "error", error: (e as Error).message });
+      }
+    });
 
-  await tracker.start();
-  log(`agency-notify watching (${n.provider}; on: ${n.on.join(", ")}; projects: ${Object.keys(cfg.projects).join(", ") || "none"})`);
+    await tracker.start();
+  }
+  log(`agency-notify watching (${n.provider}; on: ${n.on.join(", ")}; instances: ${instances.map((i) => i.name ?? "local").join(", ")})`);
   const stop = () => {
-    tracker.close();
+    for (const inst of instances) inst.tracker.close();
     process.exit(0);
   };
   process.on("SIGINT", stop);

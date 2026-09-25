@@ -12,16 +12,18 @@ import { HerdrClient, HerdrError, type AgentInfo, type AgentStatus, type PaneRea
 import { agentLabel, agentLine, clock, clockSeconds, formatBoard, formatStandup, ELAPSED, PROGRESS, STATUS_WORD, trimTail, type StandupItem } from "./format.js";
 import { findProjectWorkspace, loadBoard, matchProject, normalizeQuery, resolveTarget, type AgentView, type Board } from "./projects.js";
 import { handOver, idempotent, MAX_DELIVERIES, recentDeliveries, recordDelivery, requestInFlight, type HandoverResult } from "./delivery.js";
+import { agentKey, Fleet, type FleetBoard } from "./fleet.js";
 import type { Tracker } from "./tracker.js";
 
-export interface ToolContext {
+export type ToolContext = {
   cfg: AgencyConfig;
-  client: HerdrClient;
-  tracker: Tracker;
   audit: Audit;
   /** Free-form origin for the audit log (remote address, "stdio", ...). */
   source: string;
-}
+} & (
+  | { /** All Herdr instances; shared by all requests of the process. */ fleet: Fleet }
+  | { /** Single instance shorthand (tests, simple setups). */ client: HerdrClient; tracker: Tracker }
+);
 
 const StatusEnum = z.enum(["idle", "working", "blocked", "done", "unknown"]);
 
@@ -144,15 +146,21 @@ function slugify(s: string): string {
 }
 
 export function createMcpServer(ctx: ToolContext): McpServer {
-  const { cfg, client, tracker, audit } = ctx;
-  const instance = cfg.instance_name ?? null;
+  const { audit } = ctx;
+  const fleet = "fleet" in ctx ? ctx.fleet : new Fleet([{ name: ctx.cfg.instance_name ?? null, cfg: ctx.cfg, client: ctx.client, tracker: ctx.tracker }], ctx.cfg);
+  // Merged view: projects of all instances, for matching spoken project names.
+  const cfg = fleet.cfg;
+  const instance = fleet.label;
+  const trackerFor = (a: AgentView) => fleet.of(a).tracker;
   const server = new McpServer(
     { name: "agency", title: instance ? `Agency – ${instance}` : "Agency", version: "0.2.0" },
     {
       instructions:
-        `Controls the coding agents${instance ? ` on the Herdr instance "${instance}"` : " of one Herdr instance"} (Claude Code, Codex, …) for voice use. ` +
+        (fleet.multi
+          ? `Controls the coding agents on several machines (Herdr instances ${fleet.instances.map((i) => `"${i.name}"`).join(", ")}) from one board. `
+          : `Controls the coding agents${instance ? ` on the Herdr instance "${instance}"` : " of one Herdr instance"} (Claude Code, Codex, …) for voice use. `) +
         "Address agents by the target string that status/standup show" +
-        (instance ? `; a leading "${instance}/" is accepted` : "") +
+        (fleet.multi ? "; it starts with the instance name. Writing tools refuse targets that are ambiguous across machines" : instance ? `; a leading "${instance}/" is accepted` : "") +
         ". Pass a fresh request_id to send and reuse it on retries; after a transport error check deliveries instead of resending.",
     },
   );
@@ -171,13 +179,25 @@ export function createMcpServer(ctx: ToolContext): McpServer {
     }
   };
 
-  const board = async (): Promise<Board> => {
-    const b = await loadBoard(client, cfg);
-    for (const a of b.agents) {
-      // Keep the tracker in sync even if the subscription dropped.
-      tracker.observe({ pane_id: a.pane_id, agent_status: a.status, state_change_seq: a.state_change_seq } as unknown as AgentInfo);
-    }
-    return b;
+  const board = (): Promise<FleetBoard> => fleet.board();
+
+  /**
+   * Safety rule for writing tools: while an instance is unreachable, an unqualified target could
+   * also have meant an agent there, so only targets that name their instance are accepted.
+   */
+  const writeGuard = (b: FleetBoard, target: string): CallToolResult | null => {
+    if (!fleet.multi || !b.unreachable.length) return null;
+    const named = fleet.prefixOf(target);
+    if (named && !b.unreachable.some((u) => u.instance === named.name)) return null;
+    const down = b.unreachable.map((u) => u.instance).join(", ");
+    const up = fleet.instances.filter((i) => !b.unreachable.some((u) => u.instance === i.name)).map((i) => i.name);
+    return text(
+      named
+        ? `${named.name} is not reachable right now (${b.unreachable.find((u) => u.instance === named.name)?.error}). Nothing was done.`
+        : `${down} ${b.unreachable.length === 1 ? "is" : "are"} not reachable, so "${target}" might also mean an agent there. Nothing was done. Name the machine first, e.g. "${up[0]}/${target}".`,
+      { delivered: false, effect: false, unreachable: b.unreachable },
+      true,
+    );
   };
 
   // ------------------------------------------------------------------ status
@@ -203,8 +223,8 @@ export function createMcpServer(ctx: ToolContext): McpServer {
           if (!p) return text(`Unknown project "${args.project}". Allowed: ${Object.values(cfg.projects).map((x) => x.name).join(", ")}.`, undefined, true);
           agents = agents.filter((a) => a.project === p.key);
         }
-        const out = formatBoard(agents, tracker, { hidden: args.project ? 0 : b.hidden, attentionOnly: args.only === "attention", instance });
-        return text(out, { instance, agents: agents.map(viewJson), hidden: b.hidden });
+        const out = formatBoard(agents, trackerFor, { hidden: args.project ? 0 : b.hidden, attentionOnly: args.only === "attention", instance, unreachable: b.unreachable });
+        return text(out, { instance, agents: agents.map(viewJson), hidden: b.hidden, unreachable: b.unreachable });
       }),
   );
 
@@ -227,9 +247,10 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         const lines = args.lines ?? cfg.read.standup_lines;
         const attention = b.agents.filter((a) => a.status === "blocked" || a.status === "done");
         const rest = b.agents.filter((a) => a.status !== "blocked" && a.status !== "done");
-        const last = tracker.lastStandupAt;
+        const last = fleet.lastStandupAt;
         const items: StandupItem[] = await Promise.all(
           attention.map(async (agent) => {
+            const { client, tracker } = fleet.of(agent);
             const t = tracker.get(agent.pane_id);
             const isNew = !last || !t || t.since.getTime() > last.getTime();
             let tail: string | null = null;
@@ -244,10 +265,11 @@ export function createMcpServer(ctx: ToolContext): McpServer {
             return { agent, isNew, tail };
           }),
         );
-        const out = formatStandup(items, rest, tracker, last, instance);
-        tracker.lastStandupAt = new Date();
+        const out = formatStandup(items, rest, trackerFor, last, instance, b.unreachable);
+        fleet.lastStandupAt = new Date();
         return text(out, {
           instance,
+          unreachable: b.unreachable,
           attention: items.map((i) => ({ ...viewJson(i.agent), is_new: i.isNew, tail: i.tail })),
           others: rest.map(viewJson),
         });
@@ -277,14 +299,15 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         if (res.kind === "none") return text(res.reason, undefined, true);
         if (res.kind === "many") return text(describeMany(res.agents, res.reason), { candidates: res.agents.map(viewJson) }, true);
         const a = res.agent;
+        const { client, tracker } = fleet.of(a);
         const lines = Math.min(args.lines ?? cfg.read.default_lines, cfg.read.max_lines);
         // Agent TUIs pad the bottom of the screen with blank rows; fetch more and keep `lines` non-empty ones.
         const r = await readScreen(client, a.pane_id, Math.min(lines * 2 + 20, cfg.read.max_lines + 40), args.source ?? "recent_unwrapped");
         const body = trimTail(r.text, lines);
         const now = new Date();
         const fp = fingerprint(body);
-        const prev = lastReads.get(a.pane_id);
-        lastReads.set(a.pane_id, { fingerprint: fp, at: now });
+        const prev = lastReads.get(agentKey(a));
+        lastReads.set(agentKey(a), { fingerprint: fp, at: now });
         const changed = prev ? prev.fingerprint !== fp : null;
         const stamp =
           changed === null
@@ -331,10 +354,13 @@ export function createMcpServer(ctx: ToolContext): McpServer {
 
   async function doSend(args: { target: string; text: string; settle_seconds?: number; force?: boolean; request_id?: string }): Promise<CallToolResult> {
     const b = await board();
+    const blocked = writeGuard(b, args.target);
+    if (blocked) return blocked;
     const res = resolveTarget(b, cfg, args.target);
     if (res.kind === "none") return text(res.reason, undefined, true);
     if (res.kind === "many") return text(describeMany(res.agents, res.reason), { candidates: res.agents.map(viewJson) }, true);
     const a = res.agent;
+    const { client, tracker } = fleet.of(a);
     if (a.status === "blocked") {
       const r = await readScreen(client, a.pane_id, 30);
       return text(
@@ -345,7 +371,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
     }
 
     // Duplicate guard: the same text to the same agent within the window (covers callers without request_id).
-    const key = `${a.pane_id}\u0000${args.text.trim()}`;
+    const key = `${agentKey(a)}\u0000${args.text.trim()}`;
     const recent = recentSends.get(key);
     const windowMs = cfg.send.dedupe_minutes * 60_000;
     if (recent && !args.force && Date.now() - recent.getTime() < windowMs) {
@@ -357,7 +383,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
     }
 
     const h = await handOver(client, a.pane_id, args.text, SEND_HANDOVER_MS);
-    recordDelivery({ at: new Date(), pane_id: a.pane_id, handle: a.handle, project: a.project_name, text: args.text, request_id: args.request_id ?? null, via: "send", outcome: h.outcome, reason: h.reason });
+    recordDelivery({ at: new Date(), instance: a.instance, pane_id: a.pane_id, handle: a.handle, project: a.project_name, text: args.text, request_id: args.request_id ?? null, via: "send", outcome: h.outcome, reason: h.reason });
     if (h.outcome !== "failed") {
       recentSends.set(key, new Date());
       for (const [k, t] of recentSends) if (Date.now() - t.getTime() > Math.max(windowMs, 60_000)) recentSends.delete(k);
@@ -413,9 +439,9 @@ export function createMcpServer(ctx: ToolContext): McpServer {
           const res = resolveTarget(await board(), cfg, args.target);
           if (res.kind === "many") return text(describeMany(res.agents, res.reason), { candidates: res.agents.map(viewJson) }, true);
           // An agent that is gone can still be matched by its old handle or pane id.
-          const pane = res.kind === "one" ? res.agent.pane_id : null;
+          const one = res.kind === "one" ? res.agent : null;
           const q = args.target.trim().toLowerCase();
-          list = list.filter((d) => d.pane_id === pane || d.handle.toLowerCase() === q || d.pane_id.toLowerCase() === q);
+          list = list.filter((d) => (one && d.pane_id === one.pane_id && d.instance === one.instance) || d.handle.toLowerCase() === q);
         }
         const window = `in the last ${args.minutes ?? 60} minutes`;
         if (!list.length) {
@@ -454,6 +480,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         if (res.kind === "none") return text(res.reason, undefined, true);
         if (res.kind === "many") return text(describeMany(res.agents, res.reason), { candidates: res.agents.map(viewJson) }, true);
         const a = res.agent;
+        const { client, tracker } = fleet.of(a);
         const timeoutMs = Math.min(args.timeout_seconds ?? 20, cfg.send.max_wait_seconds) * 1000;
         try {
           const after = await client.agentWait(a.pane_id, ["idle", "done", "blocked"], timeoutMs);
@@ -498,13 +525,16 @@ export function createMcpServer(ctx: ToolContext): McpServer {
           const bad = args.keys.filter((k) => !ALLOWED_KEYS.has(k.toLowerCase()));
           if (bad.length) return text(`Keys not allowed: ${bad.join(", ")}. Allowed: ${[...ALLOWED_KEYS].join(", ")}.`, undefined, true);
           const b = await board();
+          const blocked = writeGuard(b, args.target);
+          if (blocked) return blocked;
           const res = resolveTarget(b, cfg, args.target);
           if (res.kind === "none") return text(res.reason, undefined, true);
           if (res.kind === "many") return text(describeMany(res.agents, res.reason), { candidates: res.agents.map(viewJson) }, true);
           const a = res.agent;
+          const { client, tracker } = fleet.of(a);
           const keys = args.keys.map((k) => k.toLowerCase());
           const log = (outcome: "delivered" | "unknown" | "failed", reason?: string) =>
-            recordDelivery({ at: new Date(), pane_id: a.pane_id, handle: a.handle, project: a.project_name, text: keys.join(" "), request_id: args.request_id ?? null, via: "keys", outcome, reason });
+            recordDelivery({ at: new Date(), instance: a.instance, pane_id: a.pane_id, handle: a.handle, project: a.project_name, text: keys.join(" "), request_id: args.request_id ?? null, via: "keys", outcome, reason });
           try {
             await client.agentSendKeys(a.pane_id, keys);
           } catch (e) {
@@ -550,7 +580,8 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         "if not, the agent is running without it and the task must be sent with send. " +
         "Pass a request_id and reuse it when retrying after a transport error, so no second agent is started. Arbitrary shell commands are never passed through.",
       inputSchema: {
-        project: z.string().describe("Project key, name or alias."),
+        project: z.string().describe("Project key, name or alias; with several machines optionally \"<instance>/<project>\"."),
+        instance: z.string().optional().describe("Machine (Herdr instance) to start on. Needed only when the project exists on several machines."),
         kind: z.string().optional().describe(`Agent kind: ${cfg.agent_kinds.join(" | ")} (default from project config, otherwise ${cfg.agent_kinds[0]}).`),
         name: z.string().optional().describe("Unique name for the agent (a-z, 0-9, -, _; generated by default)."),
         prompt: z.string().optional().describe("First task, handed over as soon as the agent is ready."),
@@ -571,10 +602,36 @@ export function createMcpServer(ctx: ToolContext): McpServer {
     async (args) => run("spawn", args, () => idempotent("spawn", args.request_id, () => doSpawn(args))),
   );
 
-  async function doSpawn(args: { project: string; kind?: string; name?: string; prompt?: string; label?: string; placement?: "tab" | "workspace" | "worktree"; branch?: string; request_id?: string }): Promise<CallToolResult> {
+  async function doSpawn(args: { project: string; instance?: string; kind?: string; name?: string; prompt?: string; label?: string; placement?: "tab" | "workspace" | "worktree"; branch?: string; request_id?: string }): Promise<CallToolResult> {
     const deadline = Date.now() + SPAWN_BUDGET_MS;
-    const p = matchProject(cfg, args.project);
-    if (!p) return text(`Unknown project "${args.project}". Allowed: ${Object.values(cfg.projects).map((x) => x.name).join(", ")}.`, undefined, true);
+    // Which machine: an explicit instance (parameter or "<instance>/<project>"), else the only one that has the project.
+    let projectQuery = args.project;
+    let wanted = args.instance ? fleet.prefixOf(args.instance) : undefined;
+    if (args.instance && !wanted) return text(`Unknown instance "${args.instance}". Known: ${fleet.instances.map((i) => i.name).join(", ")}.`, undefined, true);
+    const prefixed = fleet.multi ? fleet.prefixOf(args.project) : undefined;
+    if (prefixed && args.project.includes("/")) {
+      wanted = wanted ?? prefixed;
+      projectQuery = args.project.slice(args.project.indexOf("/") + 1).trim();
+    }
+    const candidates = (wanted ? [wanted] : fleet.instances).map((i) => ({ inst: i, p: matchProject(i.cfg, projectQuery) })).filter((c) => c.p);
+    if (!candidates.length) {
+      const known = (wanted ? [wanted] : fleet.instances).flatMap((i) => Object.values(i.cfg.projects).map((x) => (fleet.multi ? `${i.name}/${x.name}` : x.name)));
+      return text(`Unknown project "${args.project}"${wanted && fleet.multi ? ` on ${wanted.name}` : ""}. Allowed: ${known.join(", ")}.`, undefined, true);
+    }
+    if (candidates.length > 1) {
+      return text(
+        `Project "${projectQuery}" exists on several machines: ${candidates.map((c) => c.inst.name).join(", ")}. Nothing was started. Say where, e.g. "${candidates[0].inst.name}/${projectQuery}".`,
+        { candidates: candidates.map((c) => c.inst.name) },
+        true,
+      );
+    }
+    const { inst } = candidates[0];
+    const p = candidates[0].p!;
+    const { client, tracker } = inst;
+    if (fleet.multi) {
+      const b = await board();
+      if (b.unreachable.some((u) => u.instance === inst.name)) return text(`${inst.name} is not reachable right now. Nothing was started.`, { effect: false }, true);
+    }
     const kind = (args.kind ?? p.project.default_kind ?? cfg.agent_kinds[0]).toLowerCase();
     if (!cfg.agent_kinds.includes(kind)) return text(`Agent kind "${kind}" is not allowed. Allowed: ${cfg.agent_kinds.join(", ")}.`, undefined, true);
 
@@ -643,8 +700,8 @@ export function createMcpServer(ctx: ToolContext): McpServer {
       // Nothing usable was created; the call may be repeated.
       return text(`Could not create the ${placement === "worktree" ? "worktree workspace" : placement === "workspace" ? "workspace" : "tab"} for ${kind} in ${p.project.name}: ${errorText(e)}. No agent was started${args.prompt ? " and the task was NOT delivered" : ""}.`, { delivered: false, effect: false }, true);
     }
-    const handle = `${wsLabel}/${name}`;
-    const base = { pane_id, name, handle, kind, project: p.key, created, effect: true };
+    const handle = fleet.multi && inst.name ? `${inst.name}/${wsLabel}/${name}` : `${wsLabel}/${name}`;
+    const base = { instance: inst.name, pane_id, name, handle, kind, project: p.key, created, effect: true };
     const taskNotDelivered = args.prompt ? " The first task was NOT delivered – nothing arrived; send it with send once the agent is ready." : "";
 
     // From here on something exists on the machine: report, never throw, so a request_id replay covers it.
@@ -676,14 +733,14 @@ export function createMcpServer(ctx: ToolContext): McpServer {
           } catch {
             /* ignore */
           }
-          if (args.prompt) recordDelivery({ at: new Date(), pane_id, handle, project: p.project.name, text: args.prompt, request_id: args.request_id ?? null, via: "spawn", outcome: "failed", reason: "agent waits for input at startup" });
+          if (args.prompt) recordDelivery({ at: new Date(), instance: inst.name, pane_id, handle, project: p.project.name, text: args.prompt, request_id: args.request_id ?? null, via: "spawn", outcome: "failed", reason: "agent waits for input at startup" });
           return text(
             `${kind} was started as "${handle}" in ${where}, but is waiting for input at startup.${taskNotDelivered} Screen:\n${screen}\nAnswer with keys (e.g. enter) or check with read.`,
             { ...base, status: "blocked", delivered: false, delivery: args.prompt ? "failed" : null },
             true,
           );
         }
-        if (args.prompt) recordDelivery({ at: new Date(), pane_id, handle, project: p.project.name, text: args.prompt, request_id: args.request_id ?? null, via: "spawn", outcome: "failed", reason: `agent did not start: ${errorText(lastErr)}` });
+        if (args.prompt) recordDelivery({ at: new Date(), instance: inst.name, pane_id, handle, project: p.project.name, text: args.prompt, request_id: args.request_id ?? null, via: "spawn", outcome: "failed", reason: `agent did not start: ${errorText(lastErr)}` });
         return text(
           `A ${where} was opened for ${kind} "${name}", but the agent did not confirm its start (${lastErr ? errorText(lastErr) : "time budget used up"}).${taskNotDelivered} Check with status or read.`,
           { ...base, status: "unknown", delivered: false, delivery: args.prompt ? "failed" : null },
@@ -696,7 +753,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
         return text(`${kind} is running as "${handle}" in ${where}, directory ${dir}. It has no task yet.`, { ...base, status: agent.agent_status });
       }
       const h = await handOver(client, pane_id, args.prompt, Math.max(SPAWN_MIN_HANDOVER_MS, deadline - Date.now()));
-      recordDelivery({ at: new Date(), pane_id, handle, project: p.project.name, text: args.prompt, request_id: args.request_id ?? null, via: "spawn", outcome: h.outcome, reason: h.reason });
+      recordDelivery({ at: new Date(), instance: inst.name, pane_id, handle, project: p.project.name, text: args.prompt, request_id: args.request_id ?? null, via: "spawn", outcome: h.outcome, reason: h.reason });
       if (h.agent) tracker.observe(h.agent);
       const started = `${kind} is running as "${handle}" in ${where}, directory ${dir}.`;
       const json = { ...base, status: h.agent?.agent_status ?? agent.agent_status, ...handoverJson(h), effect: true };
@@ -721,19 +778,26 @@ export function createMcpServer(ctx: ToolContext): McpServer {
     async () =>
       run("projects", {}, async () => {
         const b = await board();
-        const rows = Object.entries(cfg.projects).map(([key, p]) => {
-          const agents = b.agents.filter((a) => a.project === key);
-          const counts = agents.reduce<Record<string, number>>((acc, a) => ((acc[a.status] = (acc[a.status] ?? 0) + 1), acc), {});
-          return { key, name: p.name, aliases: p.aliases, root: p.root, agents: agents.length, by_status: counts };
-        });
-        const lines = rows.map(
-          (r) =>
-            `- ${r.name} (key ${r.key}${r.aliases.length ? `, also: ${r.aliases.join(", ")}` : ""}): ${r.agents} agent${r.agents === 1 ? "" : "s"}${
-              r.agents ? ` – ${Object.entries(r.by_status).map(([s, n]) => `${n} ${s}`).join(", ")}` : ""
-            }`,
-        );
-        const head = instance ? `Projects on ${instance}:\n` : "";
-        return text(head + (lines.length ? lines.join("\n") : "No projects allowed. Add them to the config under 'projects'."), { instance, projects: rows });
+        const sections: string[] = [];
+        const all: Array<Record<string, unknown>> = [];
+        for (const inst of fleet.instances) {
+          const rows = Object.entries(inst.cfg.projects).map(([key, p]) => {
+            const agents = b.agents.filter((a) => a.project === key && a.instance === (inst.name ?? a.instance));
+            const counts = agents.reduce<Record<string, number>>((acc, a) => ((acc[a.status] = (acc[a.status] ?? 0) + 1), acc), {});
+            return { instance: inst.name, key, name: p.name, aliases: p.aliases, root: p.root, agents: agents.length, by_status: counts };
+          });
+          all.push(...rows);
+          const lines = rows.map(
+            (r) =>
+              `- ${r.name} (key ${r.key}${r.aliases.length ? `, also: ${r.aliases.join(", ")}` : ""}): ${r.agents} agent${r.agents === 1 ? "" : "s"}${
+                r.agents ? ` – ${Object.entries(r.by_status).map(([s, n]) => `${n} ${s}`).join(", ")}` : ""
+              }`,
+          );
+          const down = b.unreachable.find((u) => u.instance === inst.name);
+          const head = inst.name ? `Projects on ${inst.name}${down ? " (NOT reachable right now, agent counts unknown)" : ""}:\n` : "";
+          sections.push(head + (lines.length ? lines.join("\n") : "No projects allowed. Add them to the config under 'projects'."));
+        }
+        return text(sections.join("\n\n"), { instance, projects: all, unreachable: b.unreachable });
       }),
   );
 

@@ -37,6 +37,8 @@ export interface AgentView {
    * appended only when that would otherwise be ambiguous. Always accepted as a target.
    */
   handle: string;
+  /** The handle without the instance prefix; equals `handle` with a single instance. */
+  short_handle: string;
 }
 
 export interface Board {
@@ -44,6 +46,8 @@ export interface Board {
   workspaces: WorkspaceInfo[];
   /** Number of live agents that were hidden by the whitelist. */
   hidden: number;
+  /** Names of all configured instances, including ones without agents (for target prefixes). */
+  instances?: string[];
 }
 
 function isBelow(cwd: string, root: string): boolean {
@@ -144,6 +148,7 @@ export async function loadBoard(client: HerdrClient, cfg: AgencyConfig): Promise
       state_change_seq: a.state_change_seq ?? 0,
       focused: a.focused,
       handle: "",
+      short_handle: "",
     });
   }
 
@@ -165,12 +170,20 @@ export async function loadBoard(client: HerdrClient, cfg: AgencyConfig): Promise
   return { agents: visible, workspaces, hidden };
 }
 
-/** Fills `handle` for every agent; see AgentView.handle. */
-export function assignHandles(agents: AgentView[]): void {
+/**
+ * Fills `handle` and `short_handle` for every agent; see AgentView.handle. Duplicates are
+ * resolved per instance; with `withInstance` (more than one instance) the handle starts with
+ * the instance name.
+ */
+export function assignHandles(agents: AgentView[], withInstance = false): void {
   const base = (a: AgentView) => `${a.workspace_label}/${a.name ?? (isCustomTabLabel(a.tab_label) ? a.tab_label : null) ?? a.kind ?? "agent"}`;
+  const key = (a: AgentView) => `${a.instance ?? ""}\u0000${normalizeQuery(base(a))}`;
   const counts = new Map<string, number>();
-  for (const a of agents) counts.set(normalizeQuery(base(a)), (counts.get(normalizeQuery(base(a))) ?? 0) + 1);
-  for (const a of agents) a.handle = counts.get(normalizeQuery(base(a)))! > 1 ? `${base(a)}@${a.pane_id}` : base(a);
+  for (const a of agents) counts.set(key(a), (counts.get(key(a)) ?? 0) + 1);
+  for (const a of agents) {
+    a.short_handle = counts.get(key(a))! > 1 ? `${base(a)}@${a.pane_id}` : base(a);
+    a.handle = withInstance && a.instance ? `${a.instance}/${a.short_handle}` : a.short_handle;
+  }
 }
 
 /**
@@ -230,11 +243,14 @@ export type Resolution =
 export function resolveTarget(board: Board, cfg: AgencyConfig, target: string, statusFilter?: AgentStatus[]): Resolution {
   let raw = target.trim();
   let pool = board.agents;
+  // A full handle ("Home/shop/codex") before any prefix handling.
+  const fullHit = pool.filter((a) => (!statusFilter?.length || statusFilter.includes(a.status)) && normalizeQuery(a.handle) === normalizeQuery(raw));
+  if (fullHit.length === 1) return { kind: "one", agent: fullHit[0] };
   if (statusFilter?.length) pool = pool.filter((a) => statusFilter.includes(a.status));
 
   // 0. Optional instance prefix: "Office/shop/codex", or just "Office". Narrows the pool to that
   //    instance and resolves the rest as usual (with one instance it only checks and strips).
-  const instances = new Set([cfg.instance_name, ...board.agents.map((a) => a.instance)].filter((n): n is string => !!n));
+  const instances = new Set([cfg.instance_name, ...(board.instances ?? []), ...board.agents.map((a) => a.instance)].filter((n): n is string => !!n));
   for (const inst of instances) {
     const ni = normalizeQuery(inst);
     const slash = raw.indexOf("/");
@@ -249,12 +265,15 @@ export function resolveTarget(board: Board, cfg: AgencyConfig, target: string, s
   if (!q) return { kind: "none", reason: "empty target" };
 
   // 1. Unambiguous addresses: handle, pane id (optionally as "...@<pane id>").
-  const byHandle = pool.filter((a) => normalizeQuery(a.handle) === q);
+  const byHandle = pool.filter((a) => normalizeQuery(a.short_handle) === q);
   if (byHandle.length === 1) return { kind: "one", agent: byHandle[0] };
+  if (byHandle.length > 1) return { kind: "many", agents: byHandle, reason: `"${raw}" exists on several instances` };
   const at = raw.lastIndexOf("@");
   const paneQuery = paneKey(at >= 0 ? raw.slice(at + 1) : raw);
   const byPane = pool.filter((a) => paneKey(a.pane_id) === paneQuery);
   if (byPane.length === 1) return { kind: "one", agent: byPane[0] };
+  // Pane ids are per Herdr server: w1:p1 can exist on every machine.
+  if (byPane.length > 1) return { kind: "many", agents: byPane, reason: `pane "${raw}" exists on several instances` };
 
   // 2. Qualified: "<workspace or project>/<rest>".
   const slash = raw.indexOf("/");
@@ -281,9 +300,11 @@ export function resolveTarget(board: Board, cfg: AgencyConfig, target: string, s
   const exactHits = new Map<string, { agent: AgentView; via: string[] }>();
   const add = (list: AgentView[], via: string) => {
     for (const a of list) {
-      const e = exactHits.get(a.pane_id) ?? { agent: a, via: [] };
+      // Keyed by instance and pane: pane ids repeat across machines.
+      const k = `${a.instance ?? ""}\u0000${a.pane_id}`;
+      const e = exactHits.get(k) ?? { agent: a, via: [] };
       e.via.push(via);
-      exactHits.set(a.pane_id, e);
+      exactHits.set(k, e);
     }
   };
   add(pool.filter((a) => a.name && normalizeQuery(a.name) === q), "agent name");

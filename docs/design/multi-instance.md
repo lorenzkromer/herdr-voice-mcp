@@ -1,8 +1,7 @@
 # Design: one server for several Herdr instances
 
-Status: **proposal, not implemented.** This records the plan so that the work
-can start when a second machine actually exists. Until then, one server
-controls exactly one Herdr instance.
+Status: **implemented** (see "Several machines" in the README). This note
+keeps the reasoning. Open questions are listed at the end.
 
 ## Goal
 
@@ -47,19 +46,22 @@ forwarded socket like to a local one; `HerdrClient` needs no change.
 
 ### 2. Instance list in the config
 
+The local instance stays described by the top-level `instance_name`,
+`socket` and `projects`; `instances` lists the other machines:
+
 ```json
+"instance_name": "Office",
 "instances": [
-  { "name": "Office", "socket": "~/.config/herdr/herdr.sock" },
-  { "name": "Home",   "socket": "~/.config/agency/home.sock", "projects": { ... } }
+  { "name": "Home", "socket": "~/.config/agency/home.sock", "projects": { ... } }
 ]
 ```
 
-- Backwards compatible: without `instances`, the implicit single instance is
-  `{ name: instance_name, socket: socket, projects: projects }`.
-- Projects are per instance, because paths differ between machines. A
-  top-level `projects` map stays valid as the default for the local instance.
-  The same project key may exist on several instances (same repo checked out
-  on both machines).
+- Backwards compatible: without `instances` nothing changes.
+- `instance_name` is mandatory once `instances` is not empty; names must be
+  unique (case-insensitive).
+- Projects are per instance, because paths differ between machines. Remote
+  roots must be absolute (a `~` would expand to the local home). The same
+  project key may exist on several instances (same repo on both machines).
 
 ### 3. One tracker per instance
 
@@ -123,3 +125,7 @@ include the instance.
   than one instance, or stay mandatory?
 - Does the remote side need its own audit log, or is the central one enough?
 - Kill switch: one for all instances, or one per instance?
+- Herdr 0.9.1 adds CLI forwarding to saved SSH machines
+  (`herdr --machine <label>`). If the socket API gains the same forwarding,
+  the own SSH tunnel could be replaced by Herdr's machine profiles. Needs
+  0.9.1 on all machines and a check of what the socket API exposes.

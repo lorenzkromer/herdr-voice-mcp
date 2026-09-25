@@ -14,11 +14,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Audit } from "./audit.js";
 import { authenticate, killSwitchOn, RateLimiter } from "./auth.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
-import { HerdrClient } from "./herdr.js";
+import { Fleet, instancesFromConfig } from "./fleet.js";
 import { OAuthVerifier, protectedResourceMetadata } from "./oauth.js";
 import { downgradeNewerProtocolVersion } from "./protocol.js";
 import { createMcpServer } from "./tools.js";
-import { Tracker } from "./tracker.js";
 
 function parseArgs(argv: string[]) {
   const out: { stdio: boolean; config?: string; help: boolean } = { stdio: false, help: false };
@@ -45,22 +44,24 @@ async function main() {
   const cfg: LoadedConfig = loadConfig(args.config);
   const log = (m: string) => process.stderr.write(`${new Date().toISOString()} ${m}\n`);
   const audit = new Audit(cfg.audit_log, log);
-  const client = new HerdrClient(cfg.socket);
-  const tracker = new Tracker(client, log);
-
-  try {
-    const p = await client.ping();
-    log(`herdr ${p.version} (protocol ${p.protocol}) at ${cfg.socket}`);
-  } catch (e) {
-    log(`WARNING: Herdr not reachable at ${cfg.socket}: ${(e as Error).message}. Tools will fail until it is.`);
+  const instances = instancesFromConfig(cfg, log);
+  const fleet = new Fleet(instances, cfg);
+  for (const inst of instances) {
+    const who = inst.name ? `${inst.name}: ` : "";
+    try {
+      const p = await inst.client.ping();
+      log(`${who}herdr ${p.version} (protocol ${p.protocol}) at ${inst.client.socketPath}`);
+    } catch (e) {
+      log(`WARNING: ${who}Herdr not reachable at ${inst.client.socketPath}: ${(e as Error).message}. ${fleet.multi ? "It is reported as unreachable" : "Tools will fail"} until it is.`);
+    }
+    await inst.tracker.start();
   }
-  await tracker.start();
-  audit.record({ kind: "system", name: "start", outcome: "ok", detail: `config=${cfg.configPath ?? "defaults"} projects=${Object.keys(cfg.projects).length} mode=${args.stdio ? "stdio" : "http"}` });
+  audit.record({ kind: "system", name: "start", outcome: "ok", detail: `config=${cfg.configPath ?? "defaults"} projects=${Object.keys(cfg.projects).length} instances=${instances.length} mode=${args.stdio ? "stdio" : "http"}` });
 
   if (!Object.keys(cfg.projects).length) log("WARNING: no projects configured – every agent is hidden by the whitelist.");
 
   if (args.stdio) {
-    const server = createMcpServer({ cfg, client, tracker, audit, source: "stdio" });
+    const server = createMcpServer({ cfg, fleet, audit, source: "stdio" });
     await server.connect(new StdioServerTransport());
     return;
   }
@@ -181,7 +182,7 @@ async function main() {
       seenNewerVersions.add(newer);
       log(`client speaks MCP protocol ${newer}, newer than this SDK supports; answering as ${req.headers["mcp-protocol-version"]}`);
     }
-    const mcp = createMcpServer({ cfg, client, tracker, audit, source: `${source} ${who}` });
+    const mcp = createMcpServer({ cfg, fleet, audit, source: `${source} ${who}` });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // The SDK answers malformed or unsupported requests with 400 itself; without this the reason is lost.
     transport.onerror = (e) => {
@@ -218,7 +219,7 @@ async function main() {
 
   const shutdown = () => {
     audit.record({ kind: "system", name: "stop", outcome: "ok" });
-    tracker.close();
+    for (const inst of instances) inst.tracker.close();
     for (const s of servers) s.close();
     setTimeout(() => process.exit(0), 500).unref();
   };

@@ -38,14 +38,22 @@ export function agentLabel(a: AgentView): string {
  * service started has no known start, so it is reported as "since before <start>" rather
  * than as a duration that would look precise.
  */
-export function sinceText(a: AgentView, tracker: Tracker, now = Date.now()): string {
+/** A tracker, or a lookup of the tracker responsible for an agent (one per Herdr instance). */
+export type Trackers = Tracker | ((a: AgentView) => Tracker);
+
+function trackerOf(trackers: Trackers, a: AgentView): Tracker {
+  return typeof trackers === "function" ? trackers(a) : trackers;
+}
+
+export function sinceText(a: AgentView, trackers: Trackers, now = Date.now()): string {
+  const tracker = trackerOf(trackers, a);
   const t = tracker.get(a.pane_id);
   if (!t || !tracker.ready) return "";
   if (!t.exact) return ` (since before ${clock(tracker.startedAt, now)}, when the service started)`;
   return ` (for ${humanDuration(now - t.since.getTime())})`;
 }
 
-export function agentLine(a: AgentView, tracker: Tracker, now = Date.now()): string {
+export function agentLine(a: AgentView, tracker: Trackers, now = Date.now()): string {
   const topic = a.topic ? ` · topic: ${a.topic}` : "";
   return `- ${a.project_name}: "${a.handle}" (${a.kind ?? "?"}) ${STATUS_WORD[a.status]}${sinceText(a, tracker, now)}${topic}`;
 }
@@ -79,7 +87,17 @@ export function onInstance(instance: string | null | undefined): string {
   return instance ? ` on ${instance}` : "";
 }
 
-export function formatBoard(agents: AgentView[], tracker: Tracker, opts: { hidden: number; attentionOnly?: boolean; instance?: string | null }): string {
+/** One line per instance that did not answer. */
+function unreachableLines(unreachable: Array<{ instance: string; error: string }> | undefined): string[] {
+  if (!unreachable?.length) return [];
+  return ["", ...unreachable.map((u) => `${u.instance} is NOT reachable right now (${u.error}); its agents are missing from this list.`)];
+}
+
+export function formatBoard(
+  agents: AgentView[],
+  tracker: Trackers,
+  opts: { hidden: number; attentionOnly?: boolean; instance?: string | null; unreachable?: Array<{ instance: string; error: string }> },
+): string {
   const now = Date.now();
   const attention = agents.filter((a) => a.status === "blocked" || a.status === "done");
   const projects = new Set(agents.map((a) => a.project));
@@ -95,6 +113,7 @@ export function formatBoard(agents: AgentView[], tracker: Tracker, opts: { hidde
   }
   if (opts.attentionOnly && !attention.length) lines.push("Nobody needs anything right now.");
   if (opts.hidden) lines.push("", `(${plural(opts.hidden, "more agent runs", "more agents run")} outside the allowed projects and ${opts.hidden === 1 ? "is" : "are"} not shown.)`);
+  lines.push(...unreachableLines(opts.unreachable));
   return lines.join("\n");
 }
 
@@ -138,7 +157,14 @@ export function trimTail(text: string, maxLines: number): string {
   return lines.slice(-maxLines).join("\n");
 }
 
-export function formatStandup(items: StandupItem[], rest: AgentView[], tracker: Tracker, lastStandupAt: Date | null, instance?: string | null): string {
+export function formatStandup(
+  items: StandupItem[],
+  rest: AgentView[],
+  tracker: Trackers,
+  lastStandupAt: Date | null,
+  instance?: string | null,
+  unreachable?: Array<{ instance: string; error: string }>,
+): string {
   const now = Date.now();
   const lines: string[] = [];
   const since = lastStandupAt ? `Since the last stand-up (${clock(lastStandupAt)})` : "First stand-up since the service started";
@@ -169,5 +195,6 @@ export function formatStandup(items: StandupItem[], rest: AgentView[], tracker: 
   if (idle.length) {
     lines.push("", `Ready without a task: ${idle.map((a) => `${a.project_name} (${agentLabel(a)})`).join(", ")}.`);
   }
+  lines.push(...unreachableLines(unreachable));
   return lines.join("\n");
 }
