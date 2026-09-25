@@ -353,17 +353,30 @@ come from `$AGENCY_TOKEN`.
   Agents that render on the terminal's alternate screen may lose scrollback,
   so `read` can only see the current screen for them.
 - **Durations are approximate.** Herdr reports no timestamp for state
-  changes. "For at least N minutes" means the server first saw that state N
-  minutes ago.
-- **Single user.** The stand-up memory and the duplicate guard live in the
-  process and are shared by all callers.
+  changes; the server records when it observes one (also via Herdr's
+  `state_change_seq`, which reveals changes between two polls). A state
+  that already existed when the service started is reported as "since
+  before <start time>".
+- **Newer MCP protocol versions.** The Claude app may announce a protocol
+  revision that the MCP SDK does not know yet (seen: `2026-07-28`); the SDK
+  would reject such requests with HTTP 400. The server maps a newer,
+  well-formed version to the newest one the SDK supports and logs each such
+  version once. Older or malformed versions are still rejected.
+- **Single user.** The stand-up memory, the duplicate guard, `request_id`
+  replays and the `deliveries` log live in the process, are shared by all
+  callers and are lost on restart.
 
 ## Open points
 
+- Real authentication on every setup path, no secrets in URLs
+  ([#1](https://github.com/lorenzkromer/herdr-voice-mcp/issues/1)).
+- One server for several Herdr instances with a merged board, see
+  [docs/design/multi-instance.md](docs/design/multi-instance.md).
 - End-to-end OAuth login from the Claude app, and a decision on dynamic
   client registration.
 - Verifying the reverse proxy and VPN route, including reconnect after sleep.
-- A persistent log of dictated tasks for review at the desk.
+- A persistent log of dictated tasks for review at the desk (today
+  `deliveries` covers the running process only).
 - Whether the server should offer git operations or leave them to the agents.
 - Better handling of speech recognition errors in file names and technical
   terms beyond project aliases.

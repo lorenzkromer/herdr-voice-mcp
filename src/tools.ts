@@ -147,7 +147,7 @@ export function createMcpServer(ctx: ToolContext): McpServer {
   const { cfg, client, tracker, audit } = ctx;
   const instance = cfg.instance_name ?? null;
   const server = new McpServer(
-    { name: "agency", title: instance ? `Agency – ${instance}` : "Agency", version: "0.1.0" },
+    { name: "agency", title: instance ? `Agency – ${instance}` : "Agency", version: "0.2.0" },
     {
       instructions:
         `Controls the coding agents${instance ? ` on the Herdr instance "${instance}"` : " of one Herdr instance"} (Claude Code, Codex, …) for voice use. ` +

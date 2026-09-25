@@ -1,6 +1,6 @@
 {
   "name": "herdr-voice-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "MCP server for voice-driven control of Herdr coding agents: status, stand-ups, prompts and push notifications from the Claude app on your phone.",
   "type": "module",
@@ -49,6 +49,7 @@
     "launchd",
     "scripts",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ]
 }
