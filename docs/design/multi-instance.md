@@ -44,6 +44,23 @@ forwarded socket like to a local one; `HerdrClient` needs no change.
   parallel with a short per-instance timeout (about 5 s) so that a slow or
   unreachable machine cannot push a tool call past the client's ~30 s limit.
 
+### Herdr's own `herdr machine` profiles
+
+Herdr (0.9) can save SSH machine profiles (`herdr machine add --label <name>
+<ssh-target>`). The TUI then shows the remote machine in its sidebar, and
+`machine add` prepares the remote Herdr server. This helps with setup and
+manual use, but it does not replace the plan above:
+
+- IDs and agent names are scoped to one Herdr server; the profile list is not
+  a cross-machine inventory, and the socket API has no cross-machine methods.
+- Selecting a machine in the TUI does not retarget socket commands; they
+  still go to the local server.
+
+So this server still connects to each Herdr server's own socket (forwarded
+over SSH), merges the boards itself and keys all state by instance. A
+profile may pin a named remote session (`--remote-session`); the instance
+config must then point at that session's socket on the remote side.
+
 ### 2. Instance list in the config
 
 The local instance stays described by the top-level `instance_name`,
