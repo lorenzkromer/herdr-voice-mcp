@@ -16,6 +16,7 @@ import { authenticate, killSwitchOn, RateLimiter } from "./auth.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
 import { HerdrClient } from "./herdr.js";
 import { OAuthVerifier, protectedResourceMetadata } from "./oauth.js";
+import { downgradeNewerProtocolVersion } from "./protocol.js";
 import { createMcpServer } from "./tools.js";
 import { Tracker } from "./tracker.js";
 
@@ -90,6 +91,8 @@ async function main() {
     return `Bearer realm="agency", resource_metadata="${publicUrl}${metadataPath}"`;
   };
 
+  /** Newer protocol versions already reported in the log (once each). */
+  const seenNewerVersions = new Set<string>();
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const source = `${(req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ?? req.socket.remoteAddress ?? "?"}`;
@@ -173,6 +176,11 @@ async function main() {
       return;
     }
 
+    const newer = downgradeNewerProtocolVersion(req);
+    if (newer && !seenNewerVersions.has(newer)) {
+      seenNewerVersions.add(newer);
+      log(`client speaks MCP protocol ${newer}, newer than this SDK supports; answering as ${req.headers["mcp-protocol-version"]}`);
+    }
     const mcp = createMcpServer({ cfg, client, tracker, audit, source: `${source} ${who}` });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // The SDK answers malformed or unsupported requests with 400 itself; without this the reason is lost.
