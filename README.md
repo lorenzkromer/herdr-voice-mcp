@@ -332,6 +332,47 @@ How it behaves:
 The design and its trade-offs are in
 [docs/design/multi-instance.md](docs/design/multi-instance.md).
 
+## Read API for dashboards
+
+A small, strictly read-only HTTP API next to the MCP endpoint lets a browser
+dashboard show the board. It returns the same agent fields as `status`,
+merged across all instances. It never returns terminal output and accepts no
+commands.
+
+| Request | Answer |
+|---|---|
+| `GET /api/agents` | `{ generated_at, instances: [{ name, reachable }], hidden, agents: [...] }` |
+| `GET /api/agents/stream` | Server-sent events: event `agents` with the same body, sent on connect and whenever something visible changes (state changes push within a second; otherwise checked every 5 seconds) |
+
+Each agent: `instance`, `handle`, `name`, `kind`, `status`, `project`,
+`project_name`, `workspace`, `topic`, `since` (ISO time the state began),
+`since_exact` (false when the state predates the service, `since` is then its
+start) and `seconds_in_state` (null when unknown).
+
+Enable it in the config:
+
+```json
+"read_api": {
+  "enabled": true,
+  "tokens": [{ "name": "dashboard", "token": "<output of scripts/gen-token.sh>" }],
+  "allowed_origins": ["https://dashboard.example.com"]
+}
+```
+
+- **Tokens only in the `Authorization: Bearer` header.** A query string that
+  looks like it carries a credential (`?token=`, `?key=`, ...) is refused with
+  400. Read tokens are separate from the MCP token and cannot call tools.
+- **CORS** headers are sent only to the listed origins (exact
+  `scheme://host:port`, no wildcards). Requests from other origins get 403.
+  Requests without an `Origin` header (curl, server-side code) only need the
+  token.
+- Browsers' `EventSource` cannot send an `Authorization` header. Read the
+  stream with `fetch()` and `response.body.getReader()` instead, or poll
+  `/api/agents`.
+- The API is served by the same HTTP listener as the MCP endpoint, so it is
+  reachable wherever that endpoint is. Changing tokens or origins needs a
+  restart.
+
 ## Security model
 
 This service forwards instructions to agents that can write to your
@@ -365,6 +406,7 @@ that is acceptable for your code and your clients.
 |---|---|---|
 | `instance_name` | none | Speakable name of this Herdr instance, e.g. `Office`. Shown in `status`, `standup` and `projects`, accepted as a target prefix (`Office/shop/codex`) |
 | `socket` | `~/.config/herdr/herdr.sock` | Herdr API socket |
+| `read_api.*` | disabled | Read-only dashboard API: `enabled`, `path` (`/api`), `tokens` (`name`, `token`), `allowed_origins`. See Read API for dashboards |
 | `instances` | `[]` | Further Herdr instances: `name`, `socket`, `projects` (absolute remote roots), optional `worktree_patterns`. Requires `instance_name`. See Several machines |
 | `http.host` | `127.0.0.1` | Address or list of addresses to listen on |
 | `http.port` | `8791` | Port |

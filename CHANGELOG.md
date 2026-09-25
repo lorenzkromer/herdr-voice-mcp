@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Read API for dashboards
+- `GET /api/agents` and a server-sent-events stream `/api/agents/stream` with
+  the agent fields of `status` across all instances, including when each
+  state began. Strictly read-only, no terminal output.
+- Dedicated read tokens, accepted only in the `Authorization` header;
+  credentials in the query string are refused. CORS only for configured,
+  exact origins.
+
 ### Several machines
 - One server controls the agents on several Herdr instances with one merged
   board: `instances` in the config, each with its own socket (forwarded over

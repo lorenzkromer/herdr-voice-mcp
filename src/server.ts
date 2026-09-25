@@ -17,6 +17,7 @@ import { loadConfig, type LoadedConfig } from "./config.js";
 import { Fleet, instancesFromConfig } from "./fleet.js";
 import { OAuthVerifier, protectedResourceMetadata } from "./oauth.js";
 import { downgradeNewerProtocolVersion } from "./protocol.js";
+import { ReadApi } from "./readapi.js";
 import { createMcpServer } from "./tools.js";
 
 function parseArgs(argv: string[]) {
@@ -92,6 +93,9 @@ async function main() {
     return `Bearer realm="agency", resource_metadata="${publicUrl}${metadataPath}"`;
   };
 
+  const readApi = cfg.read_api.enabled ? new ReadApi(cfg, fleet, audit) : null;
+  if (readApi) log(`read API: ${cfg.read_api.path}/agents (+ /stream), ${cfg.read_api.tokens.length} token(s), origins: ${cfg.read_api.allowed_origins.join(", ") || "none (no browser access)"}`);
+
   /** Newer protocol versions already reported in the log (once each). */
   const seenNewerVersions = new Set<string>();
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse) => {
@@ -111,6 +115,16 @@ async function main() {
     if (killSwitchOn(cfg.kill_switch)) {
       audit.record({ kind: "http", name: url.pathname, source, outcome: "denied", error: "kill switch" });
       json(res, 503, { error: "agency is switched off" });
+      return;
+    }
+
+    // Read-only API for dashboards: own tokens (header only), own CORS rules.
+    if (readApi?.matches(url.pathname)) {
+      if (!limiter.allow()) {
+        json(res, 429, { error: "too many requests" }, { "retry-after": String(cfg.rate_limit.window_seconds) });
+        return;
+      }
+      await readApi.handle(req, res, url, source);
       return;
     }
 
@@ -219,6 +233,7 @@ async function main() {
 
   const shutdown = () => {
     audit.record({ kind: "system", name: "stop", outcome: "ok" });
+    readApi?.close();
     for (const inst of instances) inst.tracker.close();
     for (const s of servers) s.close();
     setTimeout(() => process.exit(0), 500).unref();

@@ -141,6 +141,18 @@ export const ConfigSchema = z.object({
     })
     .prefault({}),
   notify: NotifySchema.prefault({}),
+  /** Read-only HTTP API for browser dashboards (see README, "Read API"). */
+  read_api: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** URL prefix; must differ from http.path. */
+      path: z.string().default("/api"),
+      /** Named read-only tokens (at least 32 characters), accepted only in the Authorization header. */
+      tokens: z.array(z.object({ name: z.string().min(1), token: z.string().min(32) })).default([]),
+      /** Exact origins allowed for CORS, e.g. "https://dash.example.com". No wildcards. */
+      allowed_origins: z.array(z.string()).default([]),
+    })
+    .prefault({}),
   /**
    * Further Herdr instances on other machines (see docs/design/multi-instance.md). The local
    * instance is described by the top-level instance_name, socket and projects; instance_name
@@ -166,6 +178,24 @@ function normalize(cfg: AgencyConfig): AgencyConfig {
   for (const p of Object.values(cfg.projects)) {
     p.root = path.resolve(expandHome(p.root));
     p.extra_roots = p.extra_roots.map((r) => path.resolve(expandHome(r)));
+  }
+  if (!cfg.read_api.path.startsWith("/")) cfg.read_api.path = "/" + cfg.read_api.path;
+  cfg.read_api.path = cfg.read_api.path.replace(/\/+$/, "") || "/api";
+  if (cfg.read_api.enabled) {
+    if (!cfg.read_api.tokens.length) throw new Error("read_api.enabled needs at least one entry in read_api.tokens");
+    const mcpPath = cfg.http.path.replace(/\/+$/, "") || "/mcp";
+    if (cfg.read_api.path === mcpPath || cfg.read_api.path.startsWith(mcpPath + "/") || mcpPath.startsWith(cfg.read_api.path + "/")) {
+      throw new Error(`read_api.path "${cfg.read_api.path}" must not overlap http.path "${mcpPath}"`);
+    }
+    for (const o of cfg.read_api.allowed_origins) {
+      let u: URL;
+      try {
+        u = new URL(o);
+      } catch {
+        throw new Error(`read_api.allowed_origins: "${o}" is not an origin like https://host:port`);
+      }
+      if (u.origin !== o) throw new Error(`read_api.allowed_origins: "${o}" must be exactly an origin ("${u.origin}"), without path or trailing slash`);
+    }
   }
   if (cfg.instances.length) {
     if (!cfg.instance_name) throw new Error("instance_name must be set when instances are configured");
