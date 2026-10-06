@@ -413,7 +413,7 @@ that is acceptable for your code and your clients.
 | `http.path` | `/mcp` | Endpoint path |
 | `public_url` | none | Public base URL, required for OAuth metadata |
 | `auth.*` | `token` mode | See Authentication |
-| `projects.<key>` | none | `name`, `root`, optional `aliases`, `extra_roots`, `default_kind`. Roots may nest; an agent belongs to the project with the most specific matching root |
+| `projects.<key>` | none | `name`, `root`, optional `aliases`, `extra_roots`, `default_kind`, `exact`. Roots may nest; an agent belongs to the project with the most specific matching root. With `exact: true` only agents working exactly in the root belong to it, not in subfolders (for a parent folder such as `~/development` whose other repos should stay hidden) |
 | `worktree_patterns` | `[]` | Worktree directories; `{repo}` is replaced by the project root's basename |
 | `agent_kinds` | `["claude", "codex"]` | Kinds `spawn` may start |
 | `rate_limit` | 120 per 60 s | Process-wide request limit |

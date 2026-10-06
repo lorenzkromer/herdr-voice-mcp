@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Projects
+- `exact` project option: only agents working exactly in the project root
+  belong to it, not in subfolders, and no worktree locations are derived.
+  Lets a parent folder such as `~/development` become visible without
+  exposing every unlisted repo below it.
+
 ### Read API for dashboards
 - `GET /api/agents` and a server-sent-events stream `/api/agents/stream` with
   the agent fields of `status` across all instances, including when each

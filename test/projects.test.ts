@@ -182,3 +182,24 @@ test("findProjectWorkspace: label variants, then agents in the root; automation 
   assert.equal(findProjectWorkspace(list, agents, "acme", p, root)?.workspace_id, "w6");
   assert.equal(findProjectWorkspace([ws("w5", "auto: nightly")], agents, "acme", p, root), null);
 });
+
+test("projectForAgent: an exact project matches only its own folder, not subfolders", () => {
+  const withParent = parseConfig({
+    worktree_patterns: ["~/development/.herdr-worktrees/{repo}"],
+    projects: {
+      dev: { name: "Development", root: "~/development", exact: true },
+      acme: { name: "Acme Web App", root: "~/development/acme-web" },
+    },
+  });
+  // The parent folder itself belongs to the exact project ...
+  assert.equal(projectForAgent(withParent, { cwd: path.join(home, "development") }, null), "dev");
+  assert.equal(projectForAgent(withParent, { cwd: path.join(home, "development") + "/" }, null), "dev");
+  // ... unlisted subfolders stay hidden ...
+  assert.equal(projectForAgent(withParent, { cwd: path.join(home, "development/guitar-tuner") }, null), null);
+  assert.equal(projectForAgent(withParent, { cwd: path.join(home, "development/flutter-packages/uikit_tab_bar") }, null), null);
+  // ... and listed projects, their subfolders and worktrees keep their own project.
+  assert.equal(projectForAgent(withParent, { cwd: path.join(home, "development/acme-web/src") }, null), "acme");
+  assert.equal(projectForAgent(withParent, { cwd: path.join(home, "development/.herdr-worktrees/acme-web/feature") }, null), "acme");
+  // No worktree locations are derived for the exact project.
+  assert.equal(projectForAgent(withParent, { cwd: path.join(home, "development/.herdr-worktrees/development/x") }, null), null);
+});

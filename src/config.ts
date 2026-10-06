@@ -23,6 +23,12 @@ const ProjectSchema = z.object({
   aliases: z.array(z.string()).default([]),
   /** Agent kind used by `spawn` when none is given. */
   default_kind: z.string().optional(),
+  /**
+   * Only agents working exactly in `root` (or an extra root) belong to the project, not in
+   * subdirectories, and no worktree locations are derived. For a parent folder such as
+   * ~/development whose subfolders should stay hidden unless they have their own entry.
+   */
+  exact: z.boolean().default(false),
 });
 
 const RemoteInstanceSchema = z.object({

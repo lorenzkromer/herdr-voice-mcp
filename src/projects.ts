@@ -59,6 +59,8 @@ function isBelow(cwd: string, root: string): boolean {
 export function projectRoots(cfg: AgencyConfig, key: string): string[] {
   const p = cfg.projects[key];
   if (!p) return [];
+  // An exact project is only its own folder(s); worktrees would be subdirectories elsewhere.
+  if (p.exact) return [p.root, ...p.extra_roots];
   const repo = path.basename(p.root);
   const derived = cfg.worktree_patterns.map((pat) => pat.replace("{repo}", repo));
   return [p.root, ...p.extra_roots, ...derived];
@@ -79,9 +81,11 @@ export function projectForAgent(cfg: AgencyConfig, agent: Pick<AgentInfo, "cwd" 
   if (!cwd) return null;
   let best: { key: string; depth: number } | null = null;
   for (const key of Object.keys(cfg.projects)) {
+    const exact = cfg.projects[key].exact;
     for (const r of projectRoots(cfg, key)) {
       const depth = path.resolve(r).length;
-      if (isBelow(cwd, r) && (!best || depth > best.depth)) best = { key, depth };
+      const hit = exact ? path.resolve(cwd) === path.resolve(r) : isBelow(cwd, r);
+      if (hit && (!best || depth > best.depth)) best = { key, depth };
     }
   }
   return best?.key ?? null;
