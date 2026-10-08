@@ -147,6 +147,7 @@ const CHROME = [
   /^\s*│\s+(?:Changelog|Quit|New worktree|Resume session)\b.*│\s*$/, // welcome screen: menu rows
   /^\s*Tip: /, // tips
   /^\s*\[(?:stable|preview|beta)\]\s*$/, // release channel tag
+  /⇣\d+(?:\.\d+)?k \[stop\]\s*$/, // status line while waiting for the model
 ];
 
 /**
@@ -160,8 +161,14 @@ export const ELAPSED = /\s+·\s+\d+(?:\.\d+)?\s*(?:ms|s|m|min)(?:\s+\d+s)?\s*$/;
 export function trimTail(text: string, maxLines: number): string {
   const lines = text
     .split("\n")
-    // Grok stamps each message with a right-aligned clock ("…   11:28 AM").
-    .map((l) => l.replace(/\s+$/g, "").replace(/\s{2,}\d{1,2}:\d{2}\s?(?:AM|PM)$/, ""))
+    // Grok draws a scrollbar thumb at the right edge ("…   █") and stamps each
+    // message with a right-aligned clock ("…   11:28 AM").
+    .map((l) =>
+      l
+        .replace(/\s+$/g, "")
+        .replace(/\s+█$/, "")
+        .replace(/\s{2,}\d{1,2}:\d{2}\s?(?:AM|PM)$/, ""),
+    )
     .filter((l) => l.trim().length > 0 && !CHROME.some((re) => re.test(l)));
   return lines.slice(-maxLines).join("\n");
 }

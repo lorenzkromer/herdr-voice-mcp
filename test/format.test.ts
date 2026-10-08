@@ -99,3 +99,22 @@ test("trimTail drops Grok Build TUI chrome seen live", () => {
     "     ❯ Antworte nur mit einem Satz: Der Test ist angekommen.\n     Der Test ist angekommen.\n     Worked for 6.6s",
   );
 });
+
+test("trimTail drops Grok's scrollbar thumb and waiting line", () => {
+  const screen = [
+    "  ~/chat                                                            22K / 256K │ [Dashboard]",
+    "     ❯ Antworte nur mit einem Satz: Der Mac-Tunnel funktioniert.                                                            11:57 AM",
+    "     Der Mac-Tunnel funktioniert.                                                            11:57 AM",
+    "     Worked for 2.6s                                                            █",
+    ...Array.from({ length: 20 }, () => "                                                                                                                        █"),
+    "   ⠸ Waiting for response… 0.2s                                                            0.2s ⇣22.2k [stop]",
+    "  ╭────────────────────────────────────────────────────────────╮",
+    "  │ ❯                                                            │",
+    "  ╰──────────────────────────────────────── Grok 4.7 (high) · always-approve ─╯",
+    "  Shift+Tab:mode  │  Ctrl+.:shortcuts",
+  ].join("\n");
+  assert.equal(
+    trimTail(screen, 12),
+    "     ❯ Antworte nur mit einem Satz: Der Mac-Tunnel funktioniert.\n     Der Mac-Tunnel funktioniert.\n     Worked for 2.6s",
+  );
+});
