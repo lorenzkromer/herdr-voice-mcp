@@ -139,6 +139,14 @@ const CHROME = [
   /^\s*\S+ (?:minimal|low|medium|high|xhigh) · [~/]/, // Codex footer: model · effort · cwd
   /^\s*[⬆⚠].*│.*│/, // status bar with separators
   /^\s*⎿\s+Tip: /, // Claude Code tips
+  // Grok Build (grok CLI)
+  /\d+(?:\.\d+)?K \/ \d+K\s*│\s*\[Dashboard\]\s*$/, // header: context use + dashboard link
+  /^\s*╰─+\s.*\bGrok \d[\d.]*\b.*─╯\s*$/, // input box bottom with model and mode
+  /^\s*(?:(?:Enter|Esc|Space|Tab|Shift\+[^:\s]+|Ctrl\+[^:\s]+|Alt\+[^:\s]+):[^\s│]+\s*│?\s*)+$/, // key hint bar
+  /^\s*│.*[\u2800-\u28ff].*│\s*$/, // welcome screen: logo rows
+  /^\s*│\s+(?:Changelog|Quit|New worktree|Resume session)\b.*│\s*$/, // welcome screen: menu rows
+  /^\s*Tip: /, // tips
+  /^\s*\[(?:stable|preview|beta)\]\s*$/, // release channel tag
 ];
 
 /**
@@ -152,7 +160,8 @@ export const ELAPSED = /\s+·\s+\d+(?:\.\d+)?\s*(?:ms|s|m|min)(?:\s+\d+s)?\s*$/;
 export function trimTail(text: string, maxLines: number): string {
   const lines = text
     .split("\n")
-    .map((l) => l.replace(/\s+$/g, ""))
+    // Grok stamps each message with a right-aligned clock ("…   11:28 AM").
+    .map((l) => l.replace(/\s+$/g, "").replace(/\s{2,}\d{1,2}:\d{2}\s?(?:AM|PM)$/, ""))
     .filter((l) => l.trim().length > 0 && !CHROME.some((re) => re.test(l)));
   return lines.slice(-maxLines).join("\n");
 }
