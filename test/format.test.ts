@@ -70,3 +70,51 @@ test("progress lines and elapsed stamps are recognised for change detection", ()
   assert.equal("⏺ Building the thing · 2s".replace(ELAPSED, ""), "⏺ Building the thing");
   assert.equal("⏺ Ran 12 tests".replace(ELAPSED, ""), "⏺ Ran 12 tests");
 });
+
+test("trimTail drops Grok Build TUI chrome seen live", () => {
+  const welcome = [
+    "  ~/chat",
+    "                            │  ⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⢀⠄   Grok Build  1.0.46                                   │",
+    "                            │  ⠀⠀⣼⡟⠁⠀⠀⠀⢀⡴⠻⣿⡀⠀   New /learn skill!                                    │",
+    "                            │  ⠀⢀⠞⠁⠠⢶⣶⣶⣶⠿⠋⠀⠀⠀   New worktree                                  ctrl+w  │",
+    "                            │                   Changelog                                             │",
+    "                            │                   Quit                                          ctrl+q  │",
+    "   Tip: Use Shift+Tab to cycle between modes like Plan mode.",
+    "  ╰──────────────────────────────────────────────────── Grok 4.7 (high) · always-approve ─╯",
+    "                                                                                   [stable]",
+  ].join("\n");
+  assert.equal(trimTail(welcome, 10), "  ~/chat");
+
+  const answered = [
+    "  ~/chat                                                          22K / 256K │ [Dashboard]",
+    "     ❯ Antworte nur mit einem Satz: Der Test ist angekommen.                     11:28 AM",
+    "     Der Test ist angekommen.                                                    11:28 AM",
+    "     Worked for 6.6s",
+    "  ╰──────────────────────────────────────────────────── Grok 4.7 (high) · always-approve ─╯",
+    "  Shift+Tab:mode  │  Ctrl+.:shortcuts",
+    "  Enter:send  │  Shift+Enter/Alt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+.:shortcuts",
+  ].join("\n");
+  assert.equal(
+    trimTail(answered, 10),
+    "     ❯ Antworte nur mit einem Satz: Der Test ist angekommen.\n     Der Test ist angekommen.\n     Worked for 6.6s",
+  );
+});
+
+test("trimTail drops Grok's scrollbar thumb and waiting line", () => {
+  const screen = [
+    "  ~/chat                                                            22K / 256K │ [Dashboard]",
+    "     ❯ Antworte nur mit einem Satz: Der Mac-Tunnel funktioniert.                                                            11:57 AM",
+    "     Der Mac-Tunnel funktioniert.                                                            11:57 AM",
+    "     Worked for 2.6s                                                            █",
+    ...Array.from({ length: 20 }, () => "                                                                                                                        █"),
+    "   ⠸ Waiting for response… 0.2s                                                            0.2s ⇣22.2k [stop]",
+    "  ╭────────────────────────────────────────────────────────────╮",
+    "  │ ❯                                                            │",
+    "  ╰──────────────────────────────────────── Grok 4.7 (high) · always-approve ─╯",
+    "  Shift+Tab:mode  │  Ctrl+.:shortcuts",
+  ].join("\n");
+  assert.equal(
+    trimTail(screen, 12),
+    "     ❯ Antworte nur mit einem Satz: Der Mac-Tunnel funktioniert.\n     Der Mac-Tunnel funktioniert.\n     Worked for 2.6s",
+  );
+});
